@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sqlitexplorer"
+version = "0.2.0"
+description = "Explore SQLite databases from the terminal: tables, schema, rows and ad-hoc queries rendered with outfancy."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Carlos A. Planchón", email = "carlosandresplanchonprestes@gmail.com" },
+]
+keywords = ["sqlite", "sqlite3", "database", "cli", "terminal", "explorer"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Topic :: Database",
+    "Topic :: Database :: Front-Ends",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+    "outfancy>=0.11",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff",
+]
+
+[project.scripts]
+sqlitexplorer = "sqlitexplorer.cli:main"
+
+[project.urls]
+Repository = "https://github.com/carlosplanchon/sqlitexplorer.git"
+
+[tool.setuptools.packages.find]
+include = ["sqlitexplorer*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
