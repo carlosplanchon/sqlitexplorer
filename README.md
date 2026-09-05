@@ -49,3 +49,7 @@ uv pip install -e ".[dev]"
 uv run pytest
 uv run ruff check .
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).

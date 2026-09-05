@@ -7,6 +7,8 @@ name = "sqlitexplorer"
 version = "0.2.0"
 description = "Explore SQLite databases from the terminal: tables, schema, rows and ad-hoc queries rendered with outfancy."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [
     { name = "Carlos A. Planchón", email = "carlosandresplanchonprestes@gmail.com" },
