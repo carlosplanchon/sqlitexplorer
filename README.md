@@ -50,6 +50,26 @@ uv run pytest
 uv run ruff check .
 ```
 
+## Releasing
+
+Releases are driven by version tags. Pushing `vX.Y.Z` runs the tests, builds
+the distributions, publishes them to PyPI with
+[trusted publishing](https://docs.pypi.org/trusted-publishers/) and creates a
+GitHub release with the artifacts attached.
+
+```sh
+uv version 0.3.0                      # or: uv version --bump minor
+git commit -am "Release 0.3.0"
+git tag v0.3.0
+git push origin master v0.3.0
+```
+
+The tag must match the version in `pyproject.toml`; the workflow refuses to
+publish otherwise. Before the first release, register the repository as a
+trusted publisher of the project on PyPI with the workflow name `release.yml`
+and the environment `pypi`, and create that environment in the repository
+settings on GitHub.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
