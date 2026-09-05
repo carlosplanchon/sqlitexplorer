@@ -77,6 +77,10 @@ Every command that prints rows takes the same options:
 the JSON format NULL becomes `null`, BLOBs are base64 strings and values are
 never truncated.
 
+When a table is wider than the terminal, the widest columns are narrowed and
+their values wrapped so that every column and label stays visible. Use
+`--width` or another format to get the values on one line.
+
 ## Queries
 
 ```sh

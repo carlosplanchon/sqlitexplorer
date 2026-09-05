@@ -9,10 +9,12 @@ the charts in :mod:`sqlitexplorer.charts` and the REPL in
 from __future__ import annotations
 
 import difflib
+import functools
+import inspect
 import shutil
 import sys
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, NoReturn
@@ -205,26 +207,46 @@ def _reporting_errors() -> Iterator[None]:
         _fail(str(error))
 
 
-def _options(
-    output_format: OutputFormat,
-    null: str,
-    truncate: int | None,
-    page: int | None,
-    page_size: int | None,
-    pager: bool,
-    color: bool | None,
-    width: int | None,
-) -> OutputOptions:
-    return OutputOptions(
-        format=output_format,
-        null=null,
-        truncate=truncate,
-        page=page,
-        page_size=page_size,
-        pager=pager,
-        color=color,
-        width=width,
-    )
+OUTPUT_PARAMETERS: dict[str, tuple[object, object]] = {
+    "output_format": (FormatOption, OutputFormat.TABLE),
+    "null": (NullOption, "NULL"),
+    "truncate": (TruncateOption, None),
+    "page": (PageOption, None),
+    "page_size": (PageSizeOption, None),
+    "pager": (PagerOption, False),
+    "color": (ColorOption, None),
+    "width": (WidthOption, None),
+}
+
+
+def with_output_options(command: Callable[..., None]) -> Callable[..., None]:
+    """Expose the shared output options on *command* and hand them over as ``options``.
+
+    Typer has no option groups, so instead of repeating the eight output
+    parameters in every command this decorator appends them to the signature
+    Typer inspects, and packs the values it receives into an
+    :class:`OutputOptions` passed to the command as its ``options`` argument.
+    """
+    signature = inspect.signature(command, eval_str=True)
+    own = [parameter for parameter in signature.parameters.values() if parameter.name != "options"]
+    shared = [
+        inspect.Parameter(
+            name, inspect.Parameter.KEYWORD_ONLY, default=default, annotation=annotation
+        )
+        for name, (annotation, default) in OUTPUT_PARAMETERS.items()
+    ]
+
+    @functools.wraps(command)
+    def wrapper(**arguments: object) -> None:
+        values = {name: arguments.pop(name) for name in OUTPUT_PARAMETERS}
+        values["format"] = values.pop("output_format")
+        command(options=OutputOptions(**values), **arguments)
+
+    wrapper.__signature__ = signature.replace(parameters=[*own, *shared])  # type: ignore[attr-defined]
+    wrapper.__annotations__ = {
+        parameter.name: parameter.annotation for parameter in [*own, *shared]
+    }
+    return wrapper
 
 
 def _pairs(values: Sequence[str] | None, *, option: str) -> list[tuple[str, str]]:
@@ -274,20 +296,14 @@ def _split_list(value: str | None) -> list[str] | None:
 
 
 @app.command()
+@with_output_options
 def tables(
     database: DatabaseArg,
     include_internal: AllOption = False,
-    output_format: FormatOption = OutputFormat.TABLE,
-    null: NullOption = "NULL",
-    truncate: TruncateOption = None,
-    page: PageOption = None,
-    page_size: PageSizeOption = None,
-    pager: PagerOption = False,
-    color: ColorOption = None,
-    width: WidthOption = None,
+    *,
+    options: OutputOptions,
 ) -> None:
     """List the tables and views of the database with their row counts."""
-    options = _options(output_format, null, truncate, page, page_size, pager, color, width)
     with _reporting_errors(), open_database(database) as db:
         emit(db.tables(include_internal=include_internal), options, empty="(no tables)")
 
@@ -315,84 +331,61 @@ def schema(
 
 
 @app.command()
+@with_output_options
 def describe(
     database: DatabaseArg,
     table: TableArg,
-    output_format: FormatOption = OutputFormat.TABLE,
-    null: NullOption = "NULL",
-    truncate: TruncateOption = None,
-    page: PageOption = None,
-    page_size: PageSizeOption = None,
-    pager: PagerOption = False,
-    color: ColorOption = None,
-    width: WidthOption = None,
+    *,
+    options: OutputOptions,
 ) -> None:
     """Show the columns of a table or view: type, NOT NULL, default and primary key."""
-    options = _options(output_format, null, truncate, page, page_size, pager, color, width)
     with _reporting_errors(), open_database(database) as db:
         emit(db.columns(table), options)
 
 
 @app.command()
+@with_output_options
 def indexes(
     database: DatabaseArg,
     table: OptionalTableArg = None,
-    output_format: FormatOption = OutputFormat.TABLE,
-    null: NullOption = "NULL",
-    truncate: TruncateOption = None,
-    page: PageOption = None,
-    page_size: PageSizeOption = None,
-    pager: PagerOption = False,
-    color: ColorOption = None,
-    width: WidthOption = None,
+    *,
+    options: OutputOptions,
 ) -> None:
     """List the indexes of a table, or of every table, with the columns they cover."""
-    options = _options(output_format, null, truncate, page, page_size, pager, color, width)
     with _reporting_errors(), open_database(database) as db:
         emit(db.indexes(table), options, empty="(no indexes)")
 
 
 @app.command()
+@with_output_options
 def foreign_keys(
     database: DatabaseArg,
     table: OptionalTableArg = None,
-    output_format: FormatOption = OutputFormat.TABLE,
-    null: NullOption = "NULL",
-    truncate: TruncateOption = None,
-    page: PageOption = None,
-    page_size: PageSizeOption = None,
-    pager: PagerOption = False,
-    color: ColorOption = None,
-    width: WidthOption = None,
+    *,
+    options: OutputOptions,
 ) -> None:
     """List the foreign keys declared by a table, or by every table."""
-    options = _options(output_format, null, truncate, page, page_size, pager, color, width)
     with _reporting_errors(), open_database(database) as db:
         emit(db.foreign_keys(table), options, empty="(no foreign keys)")
 
 
 @app.command()
+@with_output_options
 def info(
     database: DatabaseArg,
     check: Annotated[
         bool, typer.Option("--check", help="Run PRAGMA integrity_check (slow on big files).")
     ] = False,
-    output_format: FormatOption = OutputFormat.TABLE,
-    null: NullOption = "NULL",
-    truncate: TruncateOption = None,
-    page: PageOption = None,
-    page_size: PageSizeOption = None,
-    pager: PagerOption = False,
-    color: ColorOption = None,
-    width: WidthOption = None,
+    *,
+    options: OutputOptions,
 ) -> None:
     """Show facts about the database file: size, pragmas and object counts."""
-    options = _options(output_format, null, truncate, page, page_size, pager, color, width)
     with _reporting_errors(), open_database(database) as db:
         emit(db.info(check=check), options)
 
 
 @app.command()
+@with_output_options
 def show(
     database: DatabaseArg,
     table: TableArg,
@@ -411,17 +404,10 @@ def show(
         typer.Option("--limit", "-n", min=0, help="Maximum number of rows to print."),
     ] = None,
     offset: Annotated[int, typer.Option("--offset", min=0, help="Number of rows to skip.")] = 0,
-    output_format: FormatOption = OutputFormat.TABLE,
-    null: NullOption = "NULL",
-    truncate: TruncateOption = None,
-    page: PageOption = None,
-    page_size: PageSizeOption = None,
-    pager: PagerOption = False,
-    color: ColorOption = None,
-    width: WidthOption = None,
+    *,
+    options: OutputOptions,
 ) -> None:
     """Print the rows of a table or view."""
-    options = _options(output_format, null, truncate, page, page_size, pager, color, width)
     with _reporting_errors(), open_database(database) as db:
         result = db.rows(
             table,
@@ -436,28 +422,23 @@ def show(
 
 
 @app.command()
+@with_output_options
 def stats(
     database: DatabaseArg,
     table: TableArg,
     top: Annotated[
         int, typer.Option("--top", min=0, help="How many frequent values to list per column.")
     ] = 3,
-    output_format: FormatOption = OutputFormat.TABLE,
-    null: NullOption = "NULL",
-    truncate: TruncateOption = None,
-    page: PageOption = None,
-    page_size: PageSizeOption = None,
-    pager: PagerOption = False,
-    color: ColorOption = None,
-    width: WidthOption = None,
+    *,
+    options: OutputOptions,
 ) -> None:
     """Per-column statistics: nulls, distinct values, min, max and most frequent values."""
-    options = _options(output_format, null, truncate, page, page_size, pager, color, width)
     with _reporting_errors(), open_database(database) as db:
         emit(db.stats(table, top=top), options)
 
 
 @app.command()
+@with_output_options
 def search(
     database: DatabaseArg,
     text: Annotated[
@@ -475,17 +456,10 @@ def search(
     limit: Annotated[
         int | None, typer.Option("--limit", "-n", min=1, help="Stop after N matches.")
     ] = None,
-    output_format: FormatOption = OutputFormat.TABLE,
-    null: NullOption = "NULL",
-    truncate: TruncateOption = None,
-    page: PageOption = None,
-    page_size: PageSizeOption = None,
-    pager: PagerOption = False,
-    color: ColorOption = None,
-    width: WidthOption = None,
+    *,
+    options: OutputOptions,
 ) -> None:
     """Find a text in every column of every table."""
-    options = _options(output_format, null, truncate, page, page_size, pager, color, width)
     with _reporting_errors(), open_database(database) as db:
         emit(db.search(text, tables=table, limit=limit), options, empty="(no matches)")
 
@@ -494,6 +468,7 @@ def search(
 
 
 @app.command()
+@with_output_options
 def query(
     database: DatabaseArg,
     sql: Annotated[
@@ -524,21 +499,14 @@ def query(
         float | None,
         typer.Option("--watch", min=0.1, help="Re-run every N seconds until Ctrl-C."),
     ] = None,
-    output_format: FormatOption = OutputFormat.TABLE,
-    null: NullOption = "NULL",
-    truncate: TruncateOption = None,
-    page: PageOption = None,
-    page_size: PageSizeOption = None,
-    pager: PagerOption = False,
-    color: ColorOption = None,
-    width: WidthOption = None,
+    *,
+    options: OutputOptions,
 ) -> None:
     """Run SQL statements and print their results."""
     statements = _read_sql(sql, file)
-    if watch is not None and (pager or write):
+    if watch is not None and (options.pager or write):
         _fail("--watch cannot be combined with --pager or --write")
     parameters = _parameters(params)
-    options = _options(output_format, null, truncate, page, page_size, pager, color, width)
     with _reporting_errors(), open_database(database, write=write) as db:
         _attach_all(db, attach, write=write)
         try:

@@ -400,7 +400,11 @@ class Explorer:
     def search(
         self, text: str, *, tables: Sequence[str] | None = None, limit: int | None = None
     ) -> ResultSet:
-        """Find *text* (case-insensitive substring) in every non-BLOB column."""
+        """Find *text* (case-insensitive substring) in every non-BLOB column.
+
+        Each table is scanned once, whatever its number of columns; one row is
+        reported per matching column.
+        """
         if not text:
             raise ExplorerError("nothing to search for")
         escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -410,30 +414,53 @@ class Explorer:
         remaining = limit
         rows = []
         for table in tables:
-            for column in self.column_names(table):
+            if remaining is not None and remaining <= 0:
+                break
+            columns = self.column_names(table)
+            for record in self._scan_table(table, columns, pattern, remaining):
+                rowid, values, matched = (
+                    record[0],
+                    record[1:][: len(columns)],
+                    record[1 + len(columns) :],
+                )
+                for column, value, hit in zip(columns, values, matched, strict=True):
+                    if not hit:
+                        continue
+                    rows.append((table, column, rowid, value))
+                    if remaining is not None:
+                        remaining -= 1
+                        if remaining <= 0:
+                            break
                 if remaining is not None and remaining <= 0:
-                    return ResultSet(columns=_SEARCH_COLUMNS, rows=rows)
-                found = self._search_column(table, column, pattern, remaining)
-                rows.extend((table, column, rowid, value) for rowid, value in found)
-                if remaining is not None:
-                    remaining -= len(found)
+                    break
         return ResultSet(columns=_SEARCH_COLUMNS, rows=rows)
 
-    def _search_column(
-        self, table: str, column: str, pattern: str, limit: int | None
+    def _scan_table(
+        self, table: str, columns: Sequence[str], pattern: str, limit: int | None
     ) -> list[tuple]:
-        q_table, q_col = quote_identifier(table), quote_identifier(column)
-        condition = f"typeof({q_col}) <> 'blob' AND CAST({q_col} AS TEXT) LIKE ? ESCAPE '\\'"
-        parameters = (pattern, -1 if limit is None else limit)
+        """One pass over *table* returning ``rowid, values..., matched flags...`` per hit row."""
+        quoted = [quote_identifier(column) for column in columns]
+        flags = [f'"__match_{index}"' for index in range(len(columns))]
+        tests = ", ".join(
+            f"(typeof({column}) <> 'blob' AND CAST({column} AS TEXT) LIKE ? ESCAPE '\\') AS {flag}"
+            for column, flag in zip(quoted, flags, strict=True)
+        )
+        selection = ", ".join(quoted)
+        parameters = (*[pattern] * len(columns), -1 if limit is None else limit)
+
+        def sql(rowid: str) -> str:
+            return (
+                f'SELECT * FROM (SELECT {rowid} AS "__rowid", {selection}, {tests}'
+                f" FROM {quote_identifier(table)}) WHERE {' OR '.join(flags)} LIMIT ?"
+            )
+
         try:
-            sql = f"SELECT rowid, {q_col} FROM {q_table} WHERE {condition} LIMIT ?"
-            return self.execute(sql, parameters).rows
+            return self.execute(sql("rowid"), parameters).rows
         except sqlite3.OperationalError as error:
             if "no such column: rowid" not in str(error):
                 raise
             # WITHOUT ROWID tables and views have no rowid to report.
-            sql = f"SELECT NULL, {q_col} FROM {q_table} WHERE {condition} LIMIT ?"
-            return self.execute(sql, parameters).rows
+            return self.execute(sql("NULL"), parameters).rows
 
     def dump(self) -> Iterator[str]:
         """The database as replayable SQL, one statement per item."""

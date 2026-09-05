@@ -32,6 +32,7 @@ __all__ = [
     "OutputOptions",
     "coerce_rows",
     "emit",
+    "fit_widths",
     "format_value",
     "infer_types",
     "ok_message",
@@ -127,6 +128,43 @@ def _natural_widths(columns: Sequence[str], rows: Sequence[tuple]) -> list[int]:
     return widths
 
 
+def fit_widths(columns: Sequence[str], natural: Sequence[int], available: int) -> list[int] | None:
+    """Column widths that keep every label intact within *available* characters.
+
+    Columns get their natural width when everything fits. Otherwise the widest
+    columns are narrowed first, down to a common cap, so that every column and
+    label stays visible and long values wrap. Returns None when not even the
+    labels fit, in which case the caller lets outfancy decide.
+    """
+    minimum = [max(len(label), 1) for label in columns]
+    if not columns or sum(minimum) > available:
+        return None
+    wanted = [max(n, m) for n, m in zip(natural, minimum, strict=True)]
+    if sum(wanted) <= available:
+        return wanted
+
+    def total(cap: int) -> int:
+        return sum(max(m, min(n, cap)) for n, m in zip(wanted, minimum, strict=True))
+
+    # Largest cap whose total still fits.
+    low, high = 0, max(wanted)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if total(middle) <= available:
+            low = middle
+        else:
+            high = middle - 1
+    widths = [max(m, min(n, low)) for n, m in zip(wanted, minimum, strict=True)]
+    slack = available - sum(widths)
+    for index in sorted(range(len(widths)), key=lambda i: wanted[i], reverse=True):
+        if slack <= 0:
+            break
+        if widths[index] < wanted[index]:
+            widths[index] += 1
+            slack -= 1
+    return widths
+
+
 def render_table(
     result: ResultSet,
     *,
@@ -137,10 +175,10 @@ def render_table(
 ) -> str:
     """Render *result* as an outfancy table.
 
-    outfancy sizes columns from the data alone and clips labels that do not
-    fit, so whenever the whole table fits on the screen the widths are passed
-    explicitly to keep the labels intact. Otherwise outfancy decides which
-    columns fit.
+    outfancy sizes columns from the data alone, clips labels that do not fit
+    and drops whole columns when the table is too wide. The widths are
+    therefore computed here (see :func:`fit_widths`) and passed explicitly;
+    outfancy only takes over when not even the labels fit on the screen.
     """
     table = outfancy.table.Table()
     table.set_empty_string(empty)
@@ -148,15 +186,10 @@ def render_table(
     columns = list(result.columns)
 
     screen = width if width is not None else shutil.get_terminal_size().columns
-    natural = _natural_widths(columns, rows)
     # outfancy keeps a two-column margin and one separator per column.
-    fits = sum(natural) + len(natural) <= screen - 2
-    return table.render(
-        data=rows,
-        label_list=columns,
-        width=natural if fits else None,
-        screen_x=width,
-    )
+    available = screen - 2 - len(columns)
+    widths = fit_widths(columns, _natural_widths(columns, rows), available)
+    return table.render(data=rows, label_list=columns, width=widths, screen_x=width)
 
 
 def render_csv(

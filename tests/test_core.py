@@ -208,6 +208,16 @@ def test_search_without_rowid_table_has_null_rowid(relational_database: Path) ->
     assert result.rows == [("notes", "body", None, "plain")]
 
 
+def test_search_reports_every_matching_column_and_numbers(database: Path) -> None:
+    with open_database(database) as db:
+        assert db.search("30").rows == [("users", "age", 1, 30)]
+        db_rows = db.search("a", tables=["users"]).rows
+    # One row per matching column: Marie/Ana by name, Ana's row also matches nothing else.
+    assert ("users", "name", 1, "Marie") in db_rows
+    assert ("users", "name", 3, "Ana") in db_rows
+    assert all(column != "avatar" for _, column, _, _ in db_rows)  # BLOBs are skipped
+
+
 def test_search_limit_and_table_filter(relational_database: Path) -> None:
     with open_database(relational_database) as db:
         assert len(db.search("e", limit=2).rows) == 2

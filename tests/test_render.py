@@ -11,6 +11,7 @@ from sqlitexplorer.render import (
     OutputFormat,
     OutputOptions,
     coerce_rows,
+    fit_widths,
     format_value,
     infer_types,
     ok_message,
@@ -65,6 +66,33 @@ def test_render_table_keeps_labels_when_it_fits() -> None:
     result = ResultSet(columns=("identifier", "v"), rows=[(1, 2)])
     text = strip_ansi(render(result, OutputOptions(width=80)))
     assert text.splitlines()[0].split() == ["identifier", "v"]
+
+
+def test_fit_widths_keeps_natural_widths_when_they_fit() -> None:
+    assert fit_widths(["id", "name"], [1, 5], 20) == [2, 5]
+
+
+def test_fit_widths_narrows_the_widest_columns_first() -> None:
+    # Wide columns are cut down to a common cap; short ones keep their width.
+    assert fit_widths(["id", "text", "note"], [2, 100, 30], 40) == [2, 19, 19]
+    # Leftover characters go to the columns that still want them, widest first.
+    assert fit_widths(["a", "b", "c"], [1, 50, 20], 30) == [1, 15, 14]
+    # Labels are never narrower than their text.
+    assert fit_widths(["identifier", "x"], [1, 100], 30) == [10, 20]
+
+
+def test_fit_widths_returns_none_when_labels_do_not_fit() -> None:
+    assert fit_widths(["identifier", "description"], [1, 1], 10) is None
+    assert fit_widths([], [], 10) is None
+
+
+def test_render_table_wraps_wide_values_instead_of_dropping_columns() -> None:
+    result = ResultSet(columns=("id", "description", "flag"), rows=[(1, "x" * 200, "yes")])
+    text = strip_ansi(render(result, OutputOptions(width=40)))
+    lines = text.splitlines()
+    assert lines[0].split() == ["id", "description", "flag"]
+    assert "yes" in text
+    assert all(len(line) <= 40 for line in lines)
 
 
 def test_render_empty_results() -> None:
