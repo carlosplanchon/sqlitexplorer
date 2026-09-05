@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sqlitexplorer"
 version = "0.2.0"
-description = "Explore SQLite databases from the terminal: tables, schema, rows and ad-hoc queries rendered with outfancy."
+description = "Explore SQLite databases from the terminal: tables, schema, stats, search, queries, charts, export/import and an interactive shell."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -13,7 +13,7 @@ requires-python = ">=3.10"
 authors = [
     { name = "Carlos A. Planchón", email = "carlosandresplanchonprestes@gmail.com" },
 ]
-keywords = ["sqlite", "sqlite3", "database", "cli", "terminal", "explorer"]
+keywords = ["sqlite", "sqlite3", "database", "cli", "terminal", "explorer", "chart", "shell", "repl"]
 classifiers = [
     "Environment :: Console",
     "Intended Audience :: Developers",
@@ -28,6 +28,7 @@ classifiers = [
 ]
 dependencies = [
     "outfancy>=0.11",
+    "plotille>=6",
     "typer>=0.12",
 ]
 
