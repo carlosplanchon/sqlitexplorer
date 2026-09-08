@@ -33,6 +33,7 @@ from sqlitexplorer.completion import complete_table
 from sqlitexplorer.core import (
     Explorer,
     ExplorerError,
+    Page,
     ReadOnlyError,
     open_database,
     split_statements,
@@ -41,15 +42,16 @@ from sqlitexplorer.render import (
     OutputFormat,
     OutputOptions,
     coerce_rows,
+    default_page_size,
     emit,
+    emit_stream,
     infer_types,
     ok_message,
     parse_number,
     parse_rows,
-    render,
     resolve_color,
     stdout_is_tty,
-    strip_ansi,
+    write_rows,
 )
 from sqlitexplorer.shell import run_shell
 
@@ -286,6 +288,13 @@ def _read_sql(sql: str | None, file: Path | None) -> list[str]:
     return statements
 
 
+def _page_window(options: OutputOptions) -> Page | None:
+    """The page requested with --page/--page-size, or None to stream everything."""
+    if options.page is None and options.page_size is None:
+        return None
+    return Page(options.page or 1, options.page_size or default_page_size())
+
+
 def _split_list(value: str | None) -> list[str] | None:
     if value is None:
         return None
@@ -408,17 +417,20 @@ def show(
     options: OutputOptions,
 ) -> None:
     """Print the rows of a table or view."""
+    selection = {
+        "columns": _split_list(columns),
+        "where": where,
+        "order_by": order_by,
+        "descending": descending,
+        "limit": limit,
+        "offset": offset,
+    }
     with _reporting_errors(), open_database(database) as db:
-        result = db.rows(
-            table,
-            columns=_split_list(columns),
-            where=where,
-            order_by=order_by,
-            descending=descending,
-            limit=limit,
-            offset=offset,
-        )
-        emit(result, options)
+        window = _page_window(options)
+        if window is None:
+            emit_stream(db.stream_rows(table, **selection), options)
+        else:
+            emit(db.rows(table, **selection, page=window), options)
 
 
 @app.command()
@@ -542,15 +554,30 @@ def _run_statement(
 ) -> None:
     started = time.perf_counter()
     bound = parameters if parameters else ()
-    result = db.explain(statement, bound) if explain else db.execute(statement, bound)
-    elapsed = (time.perf_counter() - started) * 1000
-    if result.returns_rows:
+    window = _page_window(options)
+    if explain:
+        result = db.explain(statement, bound)
         emit(result, options)
+        count = len(result.rows)
+    elif window is None:
+        stream = db.stream(statement, bound)
+        if stream.returns_rows:
+            count = emit_stream(stream, options)
+        else:
+            typer.echo(ok_message(stream))
+            count = 0
     else:
-        typer.echo(ok_message(result))
+        result = db.execute(statement, bound, page=window)
+        if result.returns_rows:
+            emit(result, options)
+            count = result.total if result.total is not None else len(result.rows)
+        else:
+            typer.echo(ok_message(result))
+            count = 0
+    elapsed = (time.perf_counter() - started) * 1000
     if time_it:
-        plural = "" if len(result.rows) == 1 else "s"
-        typer.echo(f"{len(result.rows)} row{plural} in {elapsed:.1f} ms", err=True)
+        plural = "" if count == 1 else "s"
+        typer.echo(f"{count} row{plural} in {elapsed:.1f} ms", err=True)
 
 
 @app.command()
@@ -627,11 +654,13 @@ def dump(
 ) -> None:
     """Print the whole database as SQL, like the .dump command of the sqlite3 shell."""
     with _reporting_errors(), open_database(database) as db:
-        text = "\n".join(db.dump())
         if output is None:
-            typer.echo(text)
+            for line in db.dump():
+                typer.echo(line)
         else:
-            output.write_text(text + "\n", encoding="utf-8")
+            with output.open("w", encoding="utf-8") as handle:
+                for line in db.dump():
+                    handle.write(line + "\n")
 
 
 @app.command()
@@ -665,17 +694,16 @@ def export(
             assert output is not None
             output.mkdir(parents=True, exist_ok=True)
             for name in db.names():
-                text = strip_ansi(render(db.rows(name), options))
-                (output / f"{name}.{_EXTENSIONS[output_format]}").write_text(
-                    text + "\n", encoding="utf-8"
-                )
+                target = output / f"{name}.{_EXTENSIONS[output_format]}"
+                with target.open("w", encoding="utf-8") as handle:
+                    write_rows(db.stream_rows(name), options, handle)
             return
         assert table is not None
-        text = strip_ansi(render(db.rows(table), options))
         if output is None:
-            typer.echo(text)
+            write_rows(db.stream_rows(table), options, sys.stdout)
         else:
-            output.write_text(text + "\n", encoding="utf-8")
+            with output.open("w", encoding="utf-8") as handle:
+                write_rows(db.stream_rows(table), options, handle)
 
 
 @app.command("import")

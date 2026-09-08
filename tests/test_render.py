@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import json
 
 import pytest
 
-from sqlitexplorer.core import ExplorerError, ResultSet
+from sqlitexplorer.core import ExplorerError, ResultSet, RowStream
 from sqlitexplorer.render import (
     OutputFormat,
     OutputOptions,
@@ -20,6 +21,7 @@ from sqlitexplorer.render import (
     parse_rows,
     render,
     strip_ansi,
+    write_rows,
 )
 
 SAMPLE = ResultSet(
@@ -122,6 +124,34 @@ def test_paginate_out_of_range_raises() -> None:
     result = ResultSet(columns=("n",), rows=[(i,) for i in range(5)])
     with pytest.raises(ExplorerError, match=r"page 4 is out of range \(1-3\)"):
         paginate(result, page=4, page_size=2)
+
+
+def test_paginate_uses_the_total_of_windowed_results() -> None:
+    window = ResultSet(columns=("n",), rows=[(3,)], total=7)
+    page, footer = paginate(window, page=4, page_size=1)
+    assert page is window
+    assert footer == "page 4 of 7 (7 rows)"
+    with pytest.raises(ExplorerError, match=r"page 8 is out of range \(1-7\)"):
+        paginate(window, page=8, page_size=1)
+
+
+@pytest.mark.parametrize(
+    "fmt", [OutputFormat.CSV, OutputFormat.TSV, OutputFormat.JSON, OutputFormat.MARKDOWN]
+)
+def test_write_rows_matches_render(fmt: OutputFormat) -> None:
+    options = OutputOptions(format=fmt, null="-", truncate=5)
+    for result in (SAMPLE, ResultSet(columns=("a", "b"))):
+        buffer = io.StringIO()
+        written = write_rows(RowStream(result.columns, iter(result.rows)), options, buffer)
+        assert written == len(result.rows)
+        assert buffer.getvalue() == render(result, options) + "\n"
+
+
+def test_write_rows_table_format_loads_everything_and_strips_colors() -> None:
+    buffer = io.StringIO()
+    write_rows(RowStream(SAMPLE.columns, iter(SAMPLE.rows)), OutputOptions(width=80), buffer)
+    assert "\x1b[" not in buffer.getvalue()
+    assert buffer.getvalue().splitlines()[0].split() == ["id", "name", "blob"]
 
 
 def test_ok_message() -> None:

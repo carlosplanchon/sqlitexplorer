@@ -18,20 +18,23 @@ import shlex
 import shutil
 import subprocess
 import sys
+import textwrap
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
+from typing import TextIO
 
 import outfancy.table
 import typer
 
-from sqlitexplorer.core import ExplorerError, ResultSet
+from sqlitexplorer.core import ExplorerError, ResultSet, RowStream
 
 __all__ = [
     "OutputFormat",
     "OutputOptions",
     "coerce_rows",
     "emit",
+    "emit_stream",
     "fit_widths",
     "format_value",
     "infer_types",
@@ -43,6 +46,7 @@ __all__ = [
     "resolve_color",
     "stdout_is_tty",
     "strip_ansi",
+    "write_rows",
 ]
 
 ELLIPSIS = "…"
@@ -107,7 +111,7 @@ def parse_number(text: str) -> int | float | str:
     return text
 
 
-def ok_message(result: ResultSet) -> str:
+def ok_message(result: ResultSet | RowStream) -> str:
     """What to print for a statement that returned no rows."""
     if result.rowcount >= 0:
         plural = "" if result.rowcount == 1 else "s"
@@ -213,17 +217,24 @@ def render_json(result: ResultSet) -> str:
     return json.dumps(records, ensure_ascii=False, indent=2)
 
 
-def render_markdown(result: ResultSet, *, null: str = "NULL", truncate: int | None = None) -> str:
-    def cell(value: object) -> str:
-        text = str(value).replace("|", "\\|")
-        return " ".join(text.splitlines()) if "\n" in text or "\r" in text else text
+def _markdown_cell(value: object) -> str:
+    text = str(value).replace("|", "\\|")
+    return " ".join(text.splitlines()) if "\n" in text or "\r" in text else text
 
-    lines = [
-        "| " + " | ".join(cell(column) for column in result.columns) + " |",
-        "|" + "|".join(" --- " for _ in result.columns) + "|",
-    ]
-    for row in _formatted_rows(result, null=null, truncate=truncate):
-        lines.append("| " + " | ".join(cell(value) for value in row) + " |")
+
+def _markdown_row(values: Sequence[object]) -> str:
+    return "| " + " | ".join(_markdown_cell(value) for value in values) + " |"
+
+
+def _markdown_header(columns: Sequence[str]) -> list[str]:
+    return [_markdown_row(columns), "|" + "|".join(" --- " for _ in columns) + "|"]
+
+
+def render_markdown(result: ResultSet, *, null: str = "NULL", truncate: int | None = None) -> str:
+    lines = _markdown_header(result.columns)
+    lines.extend(
+        _markdown_row(row) for row in _formatted_rows(result, null=null, truncate=truncate)
+    )
     return "\n".join(lines)
 
 
@@ -259,14 +270,20 @@ def paginate(
         return result, None
     size = page_size or default_page_size()
     number = page or 1
-    total = max(1, -(-len(result.rows) // size))
-    if number > total:
-        raise ExplorerError(f"page {number} is out of range (1-{total})")
+    if result.total is not None:
+        # core already fetched just this page; only the footer is missing.
+        pages = max(1, -(-result.total // size))
+        if number > pages:
+            raise ExplorerError(f"page {number} is out of range (1-{pages})")
+        return result, f"page {number} of {pages} ({result.total} rows)"
+    pages = max(1, -(-len(result.rows) // size))
+    if number > pages:
+        raise ExplorerError(f"page {number} is out of range (1-{pages})")
     start = (number - 1) * size
     sliced = ResultSet(
         columns=result.columns, rows=result.rows[start : start + size], rowcount=result.rowcount
     )
-    return sliced, f"page {number} of {total} ({len(result.rows)} rows)"
+    return sliced, f"page {number} of {pages} ({len(result.rows)} rows)"
 
 
 def stdout_is_tty() -> bool:
@@ -308,6 +325,89 @@ def emit(result: ResultSet, options: OutputOptions, *, empty: str = "(no rows)")
         typer.echo(text, color=use_color)
     if footer:
         typer.echo(footer, err=True)
+
+
+# --- Streaming ------------------------------------------------------------------
+
+
+def _write_csv(stream: RowStream, options: OutputOptions, out: TextIO, delimiter: str) -> int:
+    writer = csv.writer(out, delimiter=delimiter, lineterminator="\n")
+    writer.writerow(stream.columns)
+    count = 0
+    for row in stream.rows:
+        writer.writerow(
+            tuple(format_value(v, null=options.null, truncate=options.truncate) for v in row)
+        )
+        count += 1
+    return count
+
+
+def _write_json(stream: RowStream, out: TextIO) -> int:
+    count = 0
+    for row in stream.rows:
+        record = dict(zip(stream.columns, map(_json_value, row), strict=True))
+        out.write("[\n" if count == 0 else ",\n")
+        out.write(textwrap.indent(json.dumps(record, ensure_ascii=False, indent=2), "  "))
+        count += 1
+    out.write("[]\n" if count == 0 else "\n]\n")
+    return count
+
+
+def _write_markdown(stream: RowStream, options: OutputOptions, out: TextIO) -> int:
+    out.write("\n".join(_markdown_header(stream.columns)) + "\n")
+    count = 0
+    for row in stream.rows:
+        values = tuple(format_value(v, null=options.null, truncate=options.truncate) for v in row)
+        out.write(_markdown_row(values) + "\n")
+        count += 1
+    return count
+
+
+def write_rows(
+    stream: RowStream, options: OutputOptions, out: TextIO, *, empty: str = "(no rows)"
+) -> int:
+    """Write *stream* to *out* row by row. Returns how many rows were written.
+
+    The output is identical to :func:`render` followed by a newline. The table
+    format needs every row to size its columns, so it is the one format that
+    loads the whole stream first.
+    """
+    fmt = OutputFormat(options.format)
+    if fmt is OutputFormat.TABLE:
+        result = stream.collect()
+        text = render_table(
+            result, width=options.width, empty=empty, null=options.null, truncate=options.truncate
+        )
+        out.write(strip_ansi(text) + "\n")
+        count = len(result.rows)
+    elif fmt is OutputFormat.JSON:
+        count = _write_json(stream, out)
+    elif fmt is OutputFormat.MARKDOWN:
+        count = _write_markdown(stream, options, out)
+    else:
+        count = _write_csv(stream, options, out, "\t" if fmt is OutputFormat.TSV else ",")
+    out.flush()
+    return count
+
+
+def emit_stream(stream: RowStream, options: OutputOptions, *, empty: str = "(no rows)") -> int:
+    """Print *stream*, row by row when the format allows it. Returns the rows printed.
+
+    The table format, the pager and pagination need the whole result, so
+    those cases fall back to :func:`emit`.
+    """
+    fmt = OutputFormat(options.format)
+    needs_everything = (
+        fmt is OutputFormat.TABLE
+        or options.pager
+        or options.page is not None
+        or options.page_size is not None
+    )
+    if needs_everything:
+        result = stream.collect()
+        emit(result, options, empty=empty)
+        return len(result.rows)
+    return write_rows(stream, options, sys.stdout, empty=empty)
 
 
 # --- Parsing (import) ---------------------------------------------------------

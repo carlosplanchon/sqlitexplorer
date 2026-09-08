@@ -12,13 +12,17 @@ import sqlite3
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from itertools import islice
 from pathlib import Path
+from typing import NamedTuple
 
 __all__ = [
     "Explorer",
     "ExplorerError",
+    "Page",
     "ReadOnlyError",
     "ResultSet",
+    "RowStream",
     "open_database",
     "plan_tree",
     "quote_identifier",
@@ -37,23 +41,73 @@ class ReadOnlyError(ExplorerError):
     """A write was attempted on a database that was opened read-only."""
 
 
+class Page(NamedTuple):
+    """A window of rows: 1-based page ``number`` of ``size`` rows each."""
+
+    number: int
+    size: int
+
+    @property
+    def start(self) -> int:
+        return (self.number - 1) * self.size
+
+
 @dataclass(frozen=True, slots=True)
 class ResultSet:
     """Outcome of one SQL statement.
 
     ``columns`` is empty for statements that do not return rows (DDL, DML).
     ``rowcount`` is the number of rows changed by DML, or -1 when it does not
-    apply.
+    apply. When the rows are only one :class:`Page` of the result, ``total``
+    tells how many rows the statement produced in all.
     """
 
     columns: tuple[str, ...] = ()
     rows: list[tuple] = field(default_factory=list)
     rowcount: int = -1
+    total: int | None = None
 
     @property
     def returns_rows(self) -> bool:
         """Whether the statement produced a result set, even an empty one."""
         return bool(self.columns)
+
+
+@dataclass(slots=True)
+class RowStream:
+    """Rows of a statement as they come out of the cursor, without loading them all."""
+
+    columns: tuple[str, ...] = ()
+    rows: Iterator[tuple] = field(default_factory=lambda: iter(()))
+    rowcount: int = -1
+
+    @property
+    def returns_rows(self) -> bool:
+        return bool(self.columns)
+
+    def collect(self) -> ResultSet:
+        """Load every remaining row into a :class:`ResultSet`."""
+        return ResultSet(columns=self.columns, rows=list(self.rows), rowcount=self.rowcount)
+
+
+def _rows_of(cursor: sqlite3.Cursor) -> Iterator[tuple]:
+    try:
+        yield from cursor
+    finally:
+        cursor.close()
+
+
+def _window(stream: RowStream, page: Page) -> ResultSet:
+    """Keep only *page* of *stream*, counting the rest without retaining it."""
+    skipped = sum(1 for _ in islice(stream.rows, page.start))
+    rows = list(islice(stream.rows, page.size))
+    rest = sum(1 for _ in stream.rows)
+    return ResultSet(
+        columns=stream.columns,
+        rows=rows,
+        rowcount=stream.rowcount,
+        total=skipped + len(rows) + rest,
+    )
 
 
 def quote_identifier(name: str) -> str:
@@ -149,16 +203,28 @@ class Explorer:
 
     # --- Statements -------------------------------------------------------
 
-    def execute(self, sql: str, parameters: Parameters = ()) -> ResultSet:
-        """Run a single SQL statement and collect its outcome."""
+    def execute(
+        self, sql: str, parameters: Parameters = (), *, page: Page | None = None
+    ) -> ResultSet:
+        """Run a single SQL statement and collect its outcome.
+
+        With *page*, only that window of rows is kept in memory; the rest of
+        the result is counted as it streams by and reported as ``total``.
+        """
+        stream = self.stream(sql, parameters)
+        if page is None or not stream.returns_rows:
+            return stream.collect()
+        return _window(stream, page)
+
+    def stream(self, sql: str, parameters: Parameters = ()) -> RowStream:
+        """Run a single SQL statement and return its rows lazily."""
         cursor = self._connection.execute(sql, parameters)
-        try:
-            if cursor.description is None:
-                return ResultSet(rowcount=cursor.rowcount)
-            columns = tuple(name for name, *_ in cursor.description)
-            return ResultSet(columns=columns, rows=cursor.fetchall(), rowcount=cursor.rowcount)
-        finally:
+        if cursor.description is None:
+            rowcount = cursor.rowcount
             cursor.close()
+            return RowStream(rowcount=rowcount)
+        columns = tuple(name for name, *_ in cursor.description)
+        return RowStream(columns=columns, rows=_rows_of(cursor), rowcount=cursor.rowcount)
 
     def explain(self, sql: str, parameters: Parameters = ()) -> ResultSet:
         """Return the query plan of *sql* as an indented tree."""
@@ -343,22 +409,16 @@ class Explorer:
 
     # --- Data -------------------------------------------------------------
 
-    def rows(
+    def _rows_sql(
         self,
         table: str,
         *,
-        columns: Sequence[str] | None = None,
-        where: str | None = None,
-        order_by: str | None = None,
-        descending: bool = False,
-        limit: int | None = None,
-        offset: int = 0,
-    ) -> ResultSet:
-        """Return the rows of *table*, optionally filtered, ordered and windowed.
-
-        *where* is a raw SQL fragment; *columns* and *order_by* are validated
-        against the table's columns (case-insensitively).
-        """
+        columns: Sequence[str] | None,
+        where: str | None,
+        order_by: str | None,
+        descending: bool,
+    ) -> tuple[str, str, str]:
+        """``(selection, source, order)`` pieces of a SELECT over *table*."""
         selection = "*"
         order_clause = ""
         if columns or order_by:
@@ -370,11 +430,63 @@ class Explorer:
             if order_by:
                 column = quote_identifier(self._resolve_column(table, order_by, known))
                 order_clause = f" ORDER BY {column}{' DESC' if descending else ''}"
-        sql = f"SELECT {selection} FROM {quote_identifier(table)}"
+        source = f"FROM {quote_identifier(table)}"
         if where:
-            sql += f" WHERE ({where})"
-        sql += f"{order_clause} LIMIT ? OFFSET ?"
-        return self.execute(sql, (-1 if limit is None else limit, offset))
+            source += f" WHERE ({where})"
+        return selection, source, order_clause
+
+    def rows(
+        self,
+        table: str,
+        *,
+        columns: Sequence[str] | None = None,
+        where: str | None = None,
+        order_by: str | None = None,
+        descending: bool = False,
+        limit: int | None = None,
+        offset: int = 0,
+        page: Page | None = None,
+    ) -> ResultSet:
+        """Return the rows of *table*, optionally filtered, ordered and windowed.
+
+        *where* is a raw SQL fragment; *columns* and *order_by* are validated
+        against the table's columns (case-insensitively). *limit* and *offset*
+        select the rows; *page* then picks one page of them in SQL, so only
+        that page is ever loaded, and ``total`` reports how many there were.
+        """
+        selection, source, order = self._rows_sql(
+            table, columns=columns, where=where, order_by=order_by, descending=descending
+        )
+        query = f"SELECT {selection} {source}{order} LIMIT ? OFFSET ?"
+        if page is None:
+            return self.execute(query, (-1 if limit is None else limit, offset))
+        matching = self.execute(f"SELECT COUNT(*) {source}").rows[0][0]
+        total = max(0, matching - offset)
+        if limit is not None:
+            total = min(total, limit)
+        size = max(0, min(page.size, total - page.start))
+        window = self.execute(query, (size, offset + page.start))
+        return ResultSet(
+            columns=window.columns, rows=window.rows, rowcount=window.rowcount, total=total
+        )
+
+    def stream_rows(
+        self,
+        table: str,
+        *,
+        columns: Sequence[str] | None = None,
+        where: str | None = None,
+        order_by: str | None = None,
+        descending: bool = False,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> RowStream:
+        """Like :meth:`rows`, but the rows come lazily from the cursor."""
+        selection, source, order = self._rows_sql(
+            table, columns=columns, where=where, order_by=order_by, descending=descending
+        )
+        query = f"SELECT {selection} {source}{order} LIMIT ? OFFSET ?"
+        return self.stream(query, (-1 if limit is None else limit, offset))
 
     def stats(self, table: str, *, top: int = 3) -> ResultSet:
         """Per-column summary of *table*: nulls, distinct values, min, max, top values."""

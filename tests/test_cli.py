@@ -217,6 +217,49 @@ def test_show_page_out_of_range_fails(invoke: Callable, database: Path) -> None:
     assert "page 9 is out of range (1-2)" in result.output
 
 
+def test_show_page_counts_only_the_filtered_rows(invoke: Callable, database: Path) -> None:
+    result = invoke(
+        "show",
+        database,
+        "users",
+        "--where",
+        "age IS NOT NULL",
+        "--order-by",
+        "id",
+        "--page",
+        "2",
+        "--page-size",
+        "1",
+        "-f",
+        "csv",
+    )
+    assert result.exit_code == 0
+    assert result.stdout.splitlines() == ["id,name,age,avatar", "3,Ana,12,NULL"]
+    assert "page 2 of 2 (2 rows)" in result.stderr
+
+
+def test_query_page_keeps_one_window(invoke: Callable, database: Path) -> None:
+    result = invoke(
+        "query",
+        database,
+        "SELECT id FROM users ORDER BY id",
+        "--page",
+        "2",
+        "--page-size",
+        "1",
+        "-f",
+        "csv",
+        "--time",
+    )
+    assert result.exit_code == 0
+    assert result.stdout.splitlines() == ["id", "2"]
+    assert "page 2 of 3 (3 rows)" in result.stderr
+    assert "3 rows in" in result.stderr
+    beyond = invoke("query", database, "SELECT id FROM users", "--page", "9", "--page-size", "1")
+    assert beyond.exit_code == 1
+    assert "page 9 is out of range (1-3)" in beyond.output
+
+
 def test_pager_is_ignored_without_a_terminal(invoke: Callable, database: Path) -> None:
     result = invoke("show", database, "users", "--pager")
     assert result.exit_code == 0

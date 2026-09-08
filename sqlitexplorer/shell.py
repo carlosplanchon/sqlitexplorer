@@ -18,7 +18,7 @@ from pathlib import Path
 import typer
 
 from sqlitexplorer.core import Explorer, ExplorerError, split_statements, translate_error
-from sqlitexplorer.render import OutputFormat, OutputOptions, emit, ok_message
+from sqlitexplorer.render import OutputFormat, OutputOptions, emit, emit_stream, ok_message
 
 __all__ = ["Completer", "DOT_COMMANDS", "SQL_KEYWORDS", "history_path", "run_shell"]
 
@@ -171,19 +171,18 @@ def _run_sql(
 ) -> None:
     for statement in split_statements(sql):
         try:
-            result = db.execute(statement)
+            stream = db.stream(statement)
+            if stream.returns_rows:
+                emit_stream(stream, options)
+            else:
+                typer.echo(ok_message(stream))
+        except ExplorerError as error:
+            report_error(error)
         except sqlite3.Error as error:
             if write:
                 db.rollback()
             report_error(translate_error(error, write=write))
             return
-        try:
-            if result.returns_rows:
-                emit(result, options)
-            else:
-                typer.echo(ok_message(result))
-        except ExplorerError as error:
-            report_error(error)
         if write:
             db.commit()
 

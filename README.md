@@ -81,6 +81,11 @@ When a table is wider than the terminal, the widest columns are narrowed and
 their values wrapped so that every column and label stays visible. Use
 `--width` or another format to get the values on one line.
 
+Big results do not need to fit in memory: `--page` fetches only the requested
+page (in SQL for `show`, from the cursor for `query`), and the csv, tsv, json
+and markdown formats, `export` and `dump` are written row by row. The table
+format is the exception, since it needs every row to size its columns.
+
 ## Queries
 
 ```sh

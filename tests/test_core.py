@@ -9,6 +9,7 @@ import pytest
 
 from sqlitexplorer.core import (
     ExplorerError,
+    Page,
     ReadOnlyError,
     ResultSet,
     open_database,
@@ -114,6 +115,44 @@ def test_execute_accepts_named_parameters(database: Path) -> None:
     with open_database(database) as db:
         result = db.execute("SELECT name FROM users WHERE age > :age ORDER BY id", {"age": 20})
     assert result.rows == [("Marie",)]
+
+
+def test_execute_page_keeps_one_window_and_counts_the_total(database: Path) -> None:
+    with open_database(database) as db:
+        page = db.execute("SELECT id FROM users ORDER BY id", page=Page(2, 1))
+        beyond = db.execute("SELECT id FROM users ORDER BY id", page=Page(5, 2))
+        no_rows = db.execute("PRAGMA foreign_keys = ON", page=Page(1, 10))
+    assert page.rows == [(2,)]
+    assert page.total == 3
+    assert beyond.rows == []
+    assert beyond.total == 3
+    assert not no_rows.returns_rows
+
+
+def test_rows_page_is_windowed_in_sql(database: Path) -> None:
+    with open_database(database) as db:
+        first = db.rows("users", where="age IS NOT NULL", order_by="id", page=Page(1, 1))
+        capped = db.rows("users", order_by="id", limit=2, offset=1, page=Page(1, 5))
+        beyond = db.rows("users", page=Page(3, 5))
+    assert [row[1] for row in first.rows] == ["Marie"]
+    assert first.total == 2
+    assert [row[1] for row in capped.rows] == ["Joseph", "Ana"]
+    assert capped.total == 2
+    assert beyond.rows == []
+    assert beyond.total == 3
+
+
+def test_stream_yields_rows_lazily(database: Path) -> None:
+    with open_database(database) as db:
+        stream = db.stream("SELECT id FROM users ORDER BY id")
+        assert stream.returns_rows
+        assert next(stream.rows) == (1,)
+        assert stream.collect().rows == [(2,), (3,)]
+        empty = db.stream("PRAGMA foreign_keys = ON")
+        assert not empty.returns_rows
+        assert empty.collect().rows == []
+        streamed = db.stream_rows("users", columns=["name"], order_by="id", limit=2).collect()
+        assert streamed.rows == db.rows("users", columns=["name"], order_by="id", limit=2).rows
 
 
 def test_explain_returns_an_indented_plan(database: Path) -> None:
