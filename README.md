@@ -1,10 +1,18 @@
 # sqlitexplorer
 
+![sqlitexplorer banner](https://raw.githubusercontent.com/carlosplanchon/sqlitexplorer/master/assets/banner.jpg)
+
 A command-line explorer for SQLite databases. It lists tables, prints schemas,
 dumps rows, computes statistics, searches values, runs ad-hoc queries, draws
 charts, exports and imports data, and offers an interactive shell. Tables are
 rendered with [outfancy](https://github.com/carlosplanchon/outfancy) and charts
 with [plotille](https://github.com/tammoippen/plotille).
+
+[![CI](https://github.com/carlosplanchon/sqlitexplorer/actions/workflows/ci.yml/badge.svg)](https://github.com/carlosplanchon/sqlitexplorer/actions/workflows/ci.yml)
+[![PyPI version](https://img.shields.io/pypi/v/sqlitexplorer.svg)](https://pypi.org/project/sqlitexplorer/)
+[![Python versions](https://img.shields.io/pypi/pyversions/sqlitexplorer.svg)](https://pypi.org/project/sqlitexplorer/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/carlosplanchon/sqlitexplorer)
 
 ## Installation
 
