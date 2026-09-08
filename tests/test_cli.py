@@ -319,6 +319,25 @@ def test_stats_reports_per_column_summary(invoke: Callable, database: Path) -> N
     assert "age,INTEGER,1,2,12,30,12 (1)" in result.output
 
 
+def test_stats_columns_sample_and_no_top(invoke: Callable, database: Path) -> None:
+    result = invoke(
+        "stats", database, "users", "-c", "name,age", "--top", "0", "--sample", "2", "-f", "csv"
+    )
+    assert result.exit_code == 0
+    lines = result.stdout.splitlines()
+    assert lines[0] == "column,type,nulls,distinct,min,max,top"
+    assert [line.split(",")[0] for line in lines[1:]] == ["name", "age"]
+    assert all(line.endswith(",") for line in lines[1:])  # no top values
+    assert "computed on a random sample of 2 rows" in result.stderr
+
+
+def test_tables_no_count(invoke: Callable, database: Path) -> None:
+    result = invoke("tables", database, "--no-count", "-f", "csv")
+    assert result.exit_code == 0
+    assert result.stdout.splitlines()[0] == "type,name"
+    assert "table,users" in result.stdout
+
+
 def test_stats_unknown_table_fails(invoke: Callable, database: Path) -> None:
     result = invoke("stats", database, "nope")
     assert result.exit_code == 1

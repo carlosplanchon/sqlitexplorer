@@ -209,7 +209,10 @@ def test_rows_rejects_unknown_column(database: Path) -> None:
 
 def test_stats_reports_nulls_distinct_min_max_top(database: Path) -> None:
     with open_database(database) as db:
-        result = db.stats("users", top=2)
+        report = db.stats("users", top=2)
+    assert report.rows == 3
+    assert not report.sampled
+    result = report.result
     assert result.columns == ("column", "type", "nulls", "distinct", "min", "max", "top")
     by_column = {row[0]: row for row in result.rows}
     assert by_column["age"][1:6] == ("INTEGER", 1, 2, 12, 30)
@@ -222,10 +225,49 @@ def test_stats_on_view_falls_back_to_typeof_for_expressions(database: Path) -> N
     connection.execute("CREATE VIEW doubled AS SELECT name, age * 2 AS twice FROM users")
     connection.close()
     with open_database(database) as db:
-        adults = db.stats("adults")
-        doubled = db.stats("doubled")
+        adults = db.stats("adults").result
+        doubled = db.stats("doubled").result
     assert [(row[0], row[1]) for row in adults.rows] == [("name", "TEXT"), ("age", "INTEGER")]
     assert [(row[0], row[1]) for row in doubled.rows] == [("name", "TEXT"), ("twice", "integer")]
+
+
+def test_stats_columns_top_zero_and_sample(database: Path) -> None:
+    with open_database(database) as db:
+        subset = db.stats("users", columns=["AGE"], top=0)
+        assert [row[0] for row in subset.result.rows] == ["age"]
+        assert subset.result.rows[0][1:] == ("INTEGER", 1, 2, 12, 30, "")
+        sampled = db.stats("users", sample=2)
+        assert sampled.sampled
+        assert sampled.rows == 2
+        assert all(row[2] + row[3] <= 2 for row in sampled.result.rows)  # nulls + distinct
+        assert db.execute(
+            "SELECT COUNT(*) FROM sqlite_temp_master WHERE name = 'sqlitexplorer_sample'"
+        ).rows == [(0,)]  # the sample is dropped afterwards
+        with pytest.raises(ExplorerError, match="no such column in users: nope"):
+            db.stats("users", columns=["nope"])
+        assert db.stats("empty").rows == 0
+
+
+def test_stats_handles_hundreds_of_columns_in_one_pass(tmp_path: Path) -> None:
+    definition = ", ".join(f"c{index} INTEGER" for index in range(250))
+    path = make_database(
+        tmp_path / "wide.db",
+        f"CREATE TABLE wide ({definition}); INSERT INTO wide (c0, c249) VALUES (1, 2);",
+    )
+    with open_database(path) as db:
+        report = db.stats("wide", top=1)
+    assert len(report.result.rows) == 250
+    by_column = {row[0]: row for row in report.result.rows}
+    assert by_column["c0"][2:] == (0, 1, 1, 1, "1 (1)")
+    assert by_column["c1"][2:] == (1, 0, None, None, "")
+    assert by_column["c249"][5] == 2
+
+
+def test_tables_without_counts(database: Path) -> None:
+    with open_database(database) as db:
+        result = db.tables(count=False)
+    assert result.columns == ("type", "name")
+    assert ("table", "users") in result.rows
 
 
 def test_search_finds_text_in_any_table(relational_database: Path) -> None:

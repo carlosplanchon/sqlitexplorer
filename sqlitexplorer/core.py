@@ -23,6 +23,7 @@ __all__ = [
     "ReadOnlyError",
     "ResultSet",
     "RowStream",
+    "StatsReport",
     "open_database",
     "plan_tree",
     "quote_identifier",
@@ -88,6 +89,14 @@ class RowStream:
     def collect(self) -> ResultSet:
         """Load every remaining row into a :class:`ResultSet`."""
         return ResultSet(columns=self.columns, rows=list(self.rows), rowcount=self.rowcount)
+
+
+class StatsReport(NamedTuple):
+    """Per-column statistics, plus how many rows they were computed on."""
+
+    result: ResultSet
+    rows: int
+    sampled: bool
 
 
 def _rows_of(cursor: sqlite3.Cursor) -> Iterator[tuple]:
@@ -271,13 +280,16 @@ class Explorer:
         sql += " ORDER BY rowid"
         return [(kind, name, statement) for kind, name, statement in self.execute(sql).rows]
 
-    def tables(self, *, include_internal: bool = False) -> ResultSet:
-        """List tables and views together with their row counts."""
+    def tables(self, *, include_internal: bool = False, count: bool = True) -> ResultSet:
+        """List tables and views, with their row counts unless *count* is false."""
         sql = "SELECT type, name FROM sqlite_master WHERE type IN ('table', 'view')"
         if not include_internal:
             sql += " AND name NOT LIKE 'sqlite_%'"
         sql += " ORDER BY type, name"
-        rows = [(kind, name, self._count_rows(name)) for kind, name in self.execute(sql).rows]
+        objects = self.execute(sql).rows
+        if not count:
+            return ResultSet(columns=("type", "name"), rows=[tuple(row) for row in objects])
+        rows = [(kind, name, self._count_rows(name)) for kind, name in objects]
         return ResultSet(columns=("type", "name", "rows"), rows=rows)
 
     def _count_rows(self, name: str) -> int | str:
@@ -488,26 +500,99 @@ class Explorer:
         query = f"SELECT {selection} {source}{order} LIMIT ? OFFSET ?"
         return self.stream(query, (-1 if limit is None else limit, offset))
 
-    def stats(self, table: str, *, top: int = 3) -> ResultSet:
-        """Per-column summary of *table*: nulls, distinct values, min, max, top values."""
-        q_table = quote_identifier(table)
-        rows = []
-        for _cid, name, declared, *_ in self.columns(table).rows:
-            q_col = quote_identifier(name)
-            nulls, distinct, minimum, maximum, min_type = self.execute(
-                f"SELECT COUNT(*) - COUNT({q_col}), COUNT(DISTINCT {q_col}),"
-                f" MIN({q_col}), MAX({q_col}), typeof(MIN({q_col})) FROM {q_table}"
-            ).rows[0]
-            frequent = self.execute(
-                f"SELECT quote({q_col}), COUNT(*) AS n FROM {q_table}"
-                f" WHERE {q_col} IS NOT NULL GROUP BY {q_col} ORDER BY n DESC, 1 LIMIT ?",
-                (top,),
-            ).rows
-            summary = ", ".join(f"{value} ({count})" for value, count in frequent)
-            rows.append((name, declared or min_type, nulls, distinct, minimum, maximum, summary))
-        return ResultSet(
-            columns=("column", "type", "nulls", "distinct", "min", "max", "top"), rows=rows
+    def stats(
+        self,
+        table: str,
+        *,
+        top: int = 3,
+        columns: Sequence[str] | None = None,
+        sample: int | None = None,
+    ) -> StatsReport:
+        """Per-column summary of *table*: nulls, distinct values, min, max, top values.
+
+        Nulls, distinct values, minimum and maximum of every column come from a
+        single pass over the table; the *top* most frequent values need one
+        ``GROUP BY`` per column, so ``top=0`` is much cheaper on big tables.
+        With *sample*, everything is computed on a random sample of that many
+        rows copied to a temporary table.
+        """
+        info = self.columns(table).rows
+        known = [row[1] for row in info]
+        declared = {row[1]: row[2] for row in info}
+        if columns is None:
+            selected = known
+        else:
+            selected = [self._resolve_column(table, name, known) for name in columns]
+        if sample is None:
+            return self._collect_stats(quote_identifier(table), selected, declared, top, False)
+        source = self._sample(table, selected, sample)
+        try:
+            return self._collect_stats(source, selected, declared, top, True)
+        finally:
+            self._connection.execute(f"DROP TABLE IF EXISTS {source}")
+
+    def _sample(self, table: str, columns: Sequence[str], size: int) -> str:
+        """Copy a random sample of *table* into a temporary table; return its name."""
+        selection = ", ".join(quote_identifier(name) for name in columns)
+        self._connection.execute(f"DROP TABLE IF EXISTS {_SAMPLE_TABLE}")
+        self._connection.execute(
+            f"CREATE TEMP TABLE {_SAMPLE_NAME} AS SELECT {selection}"
+            f" FROM {quote_identifier(table)} ORDER BY random() LIMIT ?",
+            (size,),
         )
+        return _SAMPLE_TABLE
+
+    def _collect_stats(
+        self,
+        source: str,
+        columns: Sequence[str],
+        declared: Mapping[str, str],
+        top: int,
+        sampled: bool,
+    ) -> StatsReport:
+        rows = []
+        examined = 0
+        for start in range(0, len(columns), _STATS_CHUNK):
+            chunk = columns[start : start + _STATS_CHUNK]
+            expressions = ["COUNT(*)"]
+            for name in chunk:
+                q_col = quote_identifier(name)
+                expressions += [
+                    f"COUNT({q_col})",
+                    f"COUNT(DISTINCT {q_col})",
+                    f"MIN({q_col})",
+                    f"MAX({q_col})",
+                    f"typeof(MIN({q_col}))",
+                ]
+            values = self.execute(f"SELECT {', '.join(expressions)} FROM {source}").rows[0]
+            examined = values[0]
+            for index, name in enumerate(chunk):
+                filled, distinct, minimum, maximum, min_type = values[1 + index * 5 : 6 + index * 5]
+                rows.append(
+                    (
+                        name,
+                        declared.get(name) or min_type,
+                        examined - filled,
+                        distinct,
+                        minimum,
+                        maximum,
+                        self._top_values(source, name, top),
+                    )
+                )
+        if not columns:
+            examined = self.execute(f"SELECT COUNT(*) FROM {source}").rows[0][0]
+        return StatsReport(ResultSet(columns=_STATS_COLUMNS, rows=rows), examined, sampled)
+
+    def _top_values(self, source: str, column: str, top: int) -> str:
+        if top <= 0:
+            return ""
+        q_col = quote_identifier(column)
+        frequent = self.execute(
+            f"SELECT quote({q_col}), COUNT(*) AS n FROM {source}"
+            f" WHERE {q_col} IS NOT NULL GROUP BY {q_col} ORDER BY n DESC, 1 LIMIT ?",
+            (top,),
+        ).rows
+        return ", ".join(f"{value} ({count})" for value, count in frequent)
 
     def search(
         self, text: str, *, tables: Sequence[str] | None = None, limit: int | None = None
@@ -608,3 +693,8 @@ class Explorer:
 
 
 _SEARCH_COLUMNS = ("table", "column", "rowid", "value")
+_STATS_COLUMNS = ("column", "type", "nulls", "distinct", "min", "max", "top")
+# Columns per aggregate query: five expressions each, well below SQLITE_MAX_COLUMN.
+_STATS_CHUNK = 100
+_SAMPLE_NAME = '"sqlitexplorer_sample"'
+_SAMPLE_TABLE = f"temp.{_SAMPLE_NAME}"

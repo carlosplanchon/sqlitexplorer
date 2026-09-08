@@ -213,7 +213,7 @@ def _dot_command(
         elif command == ".indexes":
             emit(db.indexes(argument or None), options, empty="(no indexes)")
         elif command == ".stats":
-            emit(db.stats(_required(argument, command)), options)
+            emit(db.stats(_required(argument, command)).result, options)
         elif command == ".format":
             options.format = _parse_format(argument)
         elif command == ".null":

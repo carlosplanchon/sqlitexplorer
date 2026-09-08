@@ -55,9 +55,14 @@ raw SQL condition.
 
 `stats` reports, for each column, the declared type, how many NULLs, how many
 distinct values, the minimum, the maximum and the most frequent values
-(`--top N`). `search` looks for a case-insensitive substring in every non-BLOB
-column of every table (`--table` restricts it, `--limit` stops early) and
-prints the table, column, rowid and value of each match.
+(`--top N`). Everything but the frequent values comes from a single pass over
+the table; on big tables use `--top 0` to skip them, `--columns` to analyse
+only some columns, or `--sample N` to work on a random sample of N rows (the
+output then says so). Likewise `tables --no-count` skips the row counts.
+
+`search` looks for a case-insensitive substring in every non-BLOB column of
+every table (`--table` restricts it, `--limit` stops early) and prints the
+table, column, rowid and value of each match. Each table is scanned once.
 
 ## Output options
 

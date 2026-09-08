@@ -309,12 +309,20 @@ def _split_list(value: str | None) -> list[str] | None:
 def tables(
     database: DatabaseArg,
     include_internal: AllOption = False,
+    count: Annotated[
+        bool,
+        typer.Option(
+            "--count/--no-count",
+            help="Count the rows of every table and view (--no-count is faster on big ones).",
+        ),
+    ] = True,
     *,
     options: OutputOptions,
 ) -> None:
     """List the tables and views of the database with their row counts."""
     with _reporting_errors(), open_database(database) as db:
-        emit(db.tables(include_internal=include_internal), options, empty="(no tables)")
+        result = db.tables(include_internal=include_internal, count=count)
+        emit(result, options, empty="(no tables)")
 
 
 @app.command()
@@ -439,14 +447,36 @@ def stats(
     database: DatabaseArg,
     table: TableArg,
     top: Annotated[
-        int, typer.Option("--top", min=0, help="How many frequent values to list per column.")
+        int,
+        typer.Option(
+            "--top",
+            min=0,
+            help="How many frequent values to list per column; 0 skips them, which is much "
+            "faster on big tables.",
+        ),
     ] = 3,
+    columns: Annotated[
+        str | None,
+        typer.Option("--columns", "-c", help="Comma-separated list of columns to analyse."),
+    ] = None,
+    sample: Annotated[
+        int | None,
+        typer.Option(
+            "--sample",
+            min=1,
+            help="Compute on a random sample of N rows instead of the whole table.",
+        ),
+    ] = None,
     *,
     options: OutputOptions,
 ) -> None:
     """Per-column statistics: nulls, distinct values, min, max and most frequent values."""
     with _reporting_errors(), open_database(database) as db:
-        emit(db.stats(table, top=top), options)
+        report = db.stats(table, top=top, columns=_split_list(columns) or None, sample=sample)
+        emit(report.result, options)
+        if report.sampled:
+            plural = "" if report.rows == 1 else "s"
+            typer.echo(f"computed on a random sample of {report.rows} row{plural}", err=True)
 
 
 @app.command()
