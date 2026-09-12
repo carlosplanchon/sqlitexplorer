@@ -28,6 +28,7 @@ from sqlitexplorer.charts import (
     histogram_values,
     render_chart,
     render_histogram,
+    resample_series,
     series_from_result,
 )
 from sqlitexplorer.completion import complete_table
@@ -647,6 +648,13 @@ def chart(
     ] = ChartKind.LINE,
     height: Annotated[int, typer.Option("--height", min=3, help="Height in rows.")] = 15,
     bins: Annotated[int, typer.Option("--bins", min=1, help="Bins of a histogram.")] = 10,
+    resample: Annotated[
+        bool,
+        typer.Option(
+            "--resample/--no-resample",
+            help="Reduce the rows to the points the canvas can show (line and scatter only).",
+        ),
+    ] = True,
     x_label: Annotated[str | None, typer.Option("--x-label", help="Label of the X axis.")] = None,
     y_label: Annotated[str | None, typer.Option("--y-label", help="Label of the Y axis.")] = None,
     params: ParamOption = None,
@@ -675,6 +683,12 @@ def chart(
             )
         else:
             series, skipped = series_from_result(result)
+            if resample:
+                rows = len(series[0].x)
+                series = resample_series(series, kind=kind, width=screen, height=height)
+                points = len(series[0].x)
+                if points < rows:
+                    typer.echo(f"resampled {rows} rows to {points} points", err=True)
             default_y = series[0].label if len(series) == 1 else "value"
             drawing = render_chart(
                 series,

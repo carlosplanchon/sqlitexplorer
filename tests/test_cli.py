@@ -818,3 +818,28 @@ def test_query_file_reports_a_wrong_encoding(
     result = invoke("query", database, "--file", script)
     assert result.exit_code == 1
     assert "report.sql is not valid utf-8 text" in result.output
+
+
+def test_chart_resamples_lines_by_default_but_never_histograms(
+    invoke: Callable, tmp_path: Path
+) -> None:
+    source = tmp_path / "big.db"
+    connection = sqlite3.connect(source)
+    try:
+        connection.execute("CREATE TABLE m (t INTEGER, v REAL)")
+        connection.executemany(
+            "INSERT INTO m VALUES (?, ?)", [(i, float(i % 100)) for i in range(5000)]
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    args = ("chart", source, "SELECT t, v FROM m", "--width", "80", "--no-color")
+    result = invoke(*args)
+    assert result.exit_code == 0
+    assert "resampled 5000 rows to" in result.stderr
+    plain = invoke(*args, "--no-resample")
+    assert plain.exit_code == 0
+    assert "resampled" not in plain.stderr
+    histogram = invoke("chart", source, "SELECT v FROM m", "-k", "hist", "--no-color")
+    assert histogram.exit_code == 0
+    assert "resampled" not in histogram.stderr

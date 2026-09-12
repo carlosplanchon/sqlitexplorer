@@ -14,6 +14,7 @@ from datetime import datetime
 from enum import Enum
 
 import plotille
+import plotilleresample
 
 from sqlitexplorer.core import ExplorerError, ResultSet
 
@@ -23,6 +24,7 @@ __all__ = [
     "histogram_values",
     "render_chart",
     "render_histogram",
+    "resample_series",
     "series_from_result",
 ]
 
@@ -107,6 +109,27 @@ def series_from_result(result: ResultSet) -> tuple[list[Series], int]:
     return [
         Series(label=name, x=xs, y=bucket) for name, bucket in zip(y_names, ys, strict=True)
     ], skipped
+
+
+def resample_series(
+    series: Sequence[Series], *, kind: ChartKind, width: int, height: int
+) -> list[Series]:
+    """Reduce every series to the points the canvas can actually draw.
+
+    min/max keeps the extremes of every bucket, so spikes survive, and it only
+    indexes X, which the LTTB resamplers cannot do when X is a date.
+    """
+    budget = _canvas_width(width)
+    reduce = (
+        plotilleresample.resample_scatter
+        if kind is ChartKind.SCATTER
+        else plotilleresample.resample_plot_minmax
+    )
+    reduced = []
+    for item in series:
+        x, y = reduce(item.x, item.y, budget, height)
+        reduced.append(Series(label=item.label, x=list(x), y=list(y)))
+    return reduced
 
 
 def histogram_values(result: ResultSet) -> tuple[list[float], int]:

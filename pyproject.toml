@@ -29,6 +29,7 @@ classifiers = [
 dependencies = [
     "outfancy>=0.11",
     "plotille>=6",
+    "plotilleresample>=1.0",
     "typer>=0.12",
 ]
 

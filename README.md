@@ -6,7 +6,8 @@ A command-line explorer for SQLite databases. It lists tables, prints schemas,
 dumps rows, computes statistics, searches values, runs ad-hoc queries, draws
 charts, exports and imports data, and offers an interactive shell. Tables are
 rendered with [outfancy](https://github.com/carlosplanchon/outfancy) and charts
-with [plotille](https://github.com/tammoippen/plotille).
+with [plotille](https://github.com/tammoippen/plotille), resampled by
+[plotilleresample](https://github.com/carlosplanchon/plotilleresample).
 
 [![CI](https://github.com/carlosplanchon/sqlitexplorer/actions/workflows/ci.yml/badge.svg)](https://github.com/carlosplanchon/sqlitexplorer/actions/workflows/ci.yml)
 [![PyPI version](https://img.shields.io/pypi/v/sqlitexplorer.svg)](https://pypi.org/project/sqlitexplorer/)
@@ -129,6 +130,12 @@ series named after the column; rows with NULLs are skipped and counted on
 stderr. `--kind` selects `line` (default), `scatter` or `hist` (first column
 only, `--bins`). `--height`, `--width`, `--x-label`, `--y-label` and `--color`
 adjust the drawing.
+
+Line and scatter charts are reduced to what the canvas can show before they
+reach plotille, keeping the minimum and the maximum of every column of braille
+dots, so spikes survive and the drawing no longer costs more as the query grows;
+the reduction is reported on stderr. `--no-resample` sends every row instead.
+Histograms are never reduced, since dropping rows would change the distribution.
 
 ## Export, import, dump and diff
 

@@ -11,6 +11,7 @@ from sqlitexplorer.charts import (
     histogram_values,
     render_chart,
     render_histogram,
+    resample_series,
     series_from_result,
 )
 from sqlitexplorer.core import ExplorerError, ResultSet
@@ -106,3 +107,43 @@ def test_render_histogram() -> None:
     assert braille(text)
     assert "(v)" in text
     assert "\x1b[" not in text
+
+
+def test_resample_series_reduces_and_keeps_the_extremes() -> None:
+    rows: list[tuple] = [(i, 0.0) for i in range(5000)]
+    rows[1234] = (1234, 999.0)
+    rows[4321] = (4321, -999.0)
+    series, _ = series_from_result(ResultSet(columns=("x", "y"), rows=rows))
+    reduced = resample_series(series, kind=ChartKind.LINE, width=80, height=15)
+    assert len(reduced) == 1
+    assert len(reduced[0].x) == len(reduced[0].y) < 5000
+    assert max(reduced[0].y) == 999.0
+    assert min(reduced[0].y) == -999.0
+    assert reduced[0].x == sorted(reduced[0].x)
+
+
+def test_resample_series_handles_dates_on_the_x_axis() -> None:
+    rows = [(f"2020-01-01T00:{i // 60:02d}:{i % 60:02d}", float(i)) for i in range(3000)]
+    series, _ = series_from_result(ResultSet(columns=("t", "v"), rows=rows))
+    reduced = resample_series(series, kind=ChartKind.LINE, width=80, height=15)
+    assert len(reduced[0].x) < 3000
+    assert all(isinstance(value, datetime) for value in reduced[0].x)
+
+
+def test_resample_series_keeps_a_small_input_and_every_series() -> None:
+    series, _ = series_from_result(
+        ResultSet(columns=("x", "a", "b"), rows=[(1, 2, 3), (2, 4, 6.5)])
+    )
+    reduced = resample_series(series, kind=ChartKind.LINE, width=80, height=15)
+    assert [item.label for item in reduced] == ["a", "b"]
+    assert reduced[0].y == [2.0, 4.0]
+    assert reduced[1].y == [3.0, 6.5]
+
+
+def test_resample_series_scatter_keeps_more_points_than_a_line() -> None:
+    series, _ = series_from_result(
+        ResultSet(columns=("x", "y"), rows=[(i, float(i)) for i in range(20000)])
+    )
+    line = resample_series(series, kind=ChartKind.LINE, width=80, height=15)
+    scatter = resample_series(series, kind=ChartKind.SCATTER, width=80, height=15)
+    assert len(scatter[0].x) > len(line[0].x)
