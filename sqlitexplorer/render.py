@@ -53,6 +53,9 @@ ELLIPSIS = "…"
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 _INTEGER = re.compile(r"^[+-]?\d+$")
 _REAL = re.compile(r"^[+-]?(\d+\.\d*|\.\d+|\d+)([eE][+-]?\d+)?$")
+_LEADING_ZERO = re.compile(r"^[+-]?0\d")
+# Integers outside this range do not fit in a SQLite INTEGER column.
+_INT64 = range(-(2**63), 2**63)
 
 
 class OutputFormat(str, Enum):
@@ -262,6 +265,11 @@ def default_page_size() -> int:
     return max(1, shutil.get_terminal_size().lines - 4)
 
 
+def _page_footer(number: int, pages: int, rows: int) -> str:
+    plural = "" if rows == 1 else "s"
+    return f"page {number} of {pages} ({rows} row{plural})"
+
+
 def paginate(
     result: ResultSet, *, page: int | None = None, page_size: int | None = None
 ) -> tuple[ResultSet, str | None]:
@@ -275,7 +283,7 @@ def paginate(
         pages = max(1, -(-result.total // size))
         if number > pages:
             raise ExplorerError(f"page {number} is out of range (1-{pages})")
-        return result, f"page {number} of {pages} ({result.total} rows)"
+        return result, _page_footer(number, pages, result.total)
     pages = max(1, -(-len(result.rows) // size))
     if number > pages:
         raise ExplorerError(f"page {number} is out of range (1-{pages})")
@@ -283,7 +291,7 @@ def paginate(
     sliced = ResultSet(
         columns=result.columns, rows=result.rows[start : start + size], rowcount=result.rowcount
     )
-    return sliced, f"page {number} of {pages} ({len(result.rows)} rows)"
+    return sliced, _page_footer(number, pages, len(result.rows))
 
 
 def stdout_is_tty() -> bool:
@@ -422,15 +430,19 @@ def parse_rows(
     if fmt not in (OutputFormat.CSV, OutputFormat.TSV):
         raise ExplorerError(f"cannot import from the {fmt.value} format")
     separator = delimiter or ("\t" if fmt is OutputFormat.TSV else ",")
-    reader = csv.reader(io.StringIO(text), delimiter=separator)
+    if len(separator) != 1:
+        raise ExplorerError("the delimiter must be a single character")
     try:
-        headers = next(reader)
-    except StopIteration:
-        raise ExplorerError("empty file") from None
+        records = list(csv.reader(io.StringIO(text), delimiter=separator))
+    except csv.Error as error:
+        raise ExplorerError(f"cannot read the file: {error}") from error
+    if not records:
+        raise ExplorerError("empty file")
+    headers, *rest = records
     if not any(header.strip() for header in headers):
         raise ExplorerError("empty file")
     rows: list[list[object]] = []
-    for number, record in enumerate(reader, start=2):
+    for number, record in enumerate(rest, start=2):
         if not record:
             continue
         if len(record) > len(headers):
@@ -459,6 +471,8 @@ def _parse_json_rows(text: str) -> tuple[list[str], list[list[object]]]:
 def _plain_json_value(value: object) -> object:
     if isinstance(value, bool):
         return int(value)
+    if isinstance(value, int) and value not in _INT64:
+        return str(value)
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False)
     return value
@@ -470,8 +484,11 @@ def _classify(value: object) -> str:
     if isinstance(value, float):
         return "REAL"
     text = str(value).strip()
+    if _LEADING_ZERO.match(text):
+        # 007 is a code, not a number: storing it as one would drop the zeros.
+        return "TEXT"
     if _INTEGER.match(text):
-        return "INTEGER"
+        return "INTEGER" if int(text) in _INT64 else "TEXT"
     if _REAL.match(text):
         return "REAL"
     return "TEXT"

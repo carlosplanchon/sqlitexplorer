@@ -407,7 +407,9 @@ def test_query_rejects_empty_sql(invoke: Callable, database: Path) -> None:
 
 
 def test_query_requires_sql_or_file(invoke: Callable, database: Path, tmp_path: Path) -> None:
-    assert "give either" in invoke("query", database).output
+    neither = invoke("query", database)
+    assert neither.exit_code == 1
+    assert "give an SQL statement, - to read it from stdin, or --file" in neither.output
     script = tmp_path / "s.sql"
     script.write_text("SELECT 1;")
     result = invoke("query", database, "SELECT 1", "--file", script)
@@ -720,3 +722,99 @@ def test_diff_reports_added_removed_changed_exit_1(
     assert "+ table extra" in lines
     assert "~ table empty" in lines
     assert any(line.startswith("+") and "z" in line for line in lines)
+
+
+def test_export_all_keeps_the_files_inside_the_output_directory(
+    invoke: Callable, tmp_path: Path
+) -> None:
+    source = tmp_path / "traversal.db"
+    connection = sqlite3.connect(source)
+    try:
+        connection.executescript(
+            'CREATE TABLE "../escaped" (a); INSERT INTO "../escaped" VALUES (1);'
+        )
+    finally:
+        connection.close()
+    target = tmp_path / "out"
+    result = invoke("export", source, "--all", "-o", target)
+    assert result.exit_code == 0
+    assert not (tmp_path / "escaped.csv").exists()
+    assert [path.name for path in target.iterdir()] == ["_escaped.csv"]
+
+
+def test_export_all_rejects_names_that_share_a_file(invoke: Callable, tmp_path: Path) -> None:
+    source = tmp_path / "collide.db"
+    connection = sqlite3.connect(source)
+    try:
+        connection.executescript('CREATE TABLE "a b" (x); CREATE TABLE "a/b" (x);')
+    finally:
+        connection.close()
+    result = invoke("export", source, "--all", "-o", tmp_path / "out")
+    assert result.exit_code == 1
+    assert "both export to a_b.csv" in result.output
+
+
+def test_export_all_skips_unreadable_objects(
+    invoke: Callable, database: Path, tmp_path: Path
+) -> None:
+    connection = sqlite3.connect(database)
+    try:
+        connection.executescript("CREATE VIEW broken AS SELECT * FROM gone;")
+    finally:
+        connection.close()
+    target = tmp_path / "out"
+    result = invoke("export", database, "--all", "-o", target)
+    assert result.exit_code == 0
+    assert "skipped broken" in result.stderr
+    assert sorted(path.name for path in target.iterdir()) == [
+        "adults.csv",
+        "empty.csv",
+        "users.csv",
+    ]
+
+
+def test_import_reports_a_wrong_encoding_and_accepts_the_right_one(
+    invoke: Callable, database: Path, tmp_path: Path
+) -> None:
+    source = tmp_path / "people.csv"
+    source.write_bytes("name\nJosé\n".encode("cp1252"))
+    result = invoke("import", database, "people", source)
+    assert result.exit_code == 1
+    assert "people.csv is not valid utf-8-sig text" in result.output
+    decoded = invoke("import", database, "people", source, "--encoding", "cp1252")
+    assert decoded.exit_code == 0
+    assert "José" in invoke("show", database, "people").output
+    unknown = invoke("import", database, "people", source, "--encoding", "nope")
+    assert unknown.exit_code == 1
+    assert "unknown encoding: nope" in unknown.output
+
+
+def test_import_keeps_codes_and_huge_integers_intact(
+    invoke: Callable, database: Path, tmp_path: Path
+) -> None:
+    source = tmp_path / "codes.csv"
+    source.write_text("zip,qty,big\n007,3,99999999999999999999\n")
+    result = invoke("import", database, "codes", source)
+    assert result.exit_code == 0
+    described = invoke("describe", database, "codes", "-f", "csv").output.splitlines()
+    assert [line.split(",")[2] for line in described[1:]] == ["TEXT", "INTEGER", "TEXT"]
+    rows = invoke("show", database, "codes", "-f", "csv").output.splitlines()
+    assert rows[1] == "007,3,99999999999999999999"
+
+
+def test_import_reports_a_malformed_csv(invoke: Callable, database: Path, tmp_path: Path) -> None:
+    source = tmp_path / "huge.csv"
+    source.write_text("note\n" + "x" * 200_000 + "\n")
+    result = invoke("import", database, "notes", source)
+    assert result.exit_code == 1
+    assert "cannot read the file" in result.output
+
+
+def test_query_file_reports_a_wrong_encoding(
+    invoke: Callable, database: Path, tmp_path: Path
+) -> None:
+    script = tmp_path / "report.sql"
+    script.write_bytes("SELECT 'José';".encode("cp1252"))
+    result = invoke("query", database, "--file", script)
+    assert result.exit_code == 1
+    assert "report.sql is not valid utf-8 text" in result.output

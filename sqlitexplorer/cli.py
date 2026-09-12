@@ -11,6 +11,7 @@ from __future__ import annotations
 import difflib
 import functools
 import inspect
+import re
 import shutil
 import sys
 import time
@@ -156,6 +157,7 @@ _EXTENSIONS = {
     OutputFormat.MARKDOWN: "md",
 }
 _FORMAT_BY_SUFFIX = {".csv": OutputFormat.CSV, ".tsv": OutputFormat.TSV, ".json": OutputFormat.JSON}
+_UNSAFE_IN_NAME = re.compile(r"[^\w.-]")
 
 
 # --- Helpers ------------------------------------------------------------------
@@ -273,11 +275,31 @@ def _attach_all(db: Explorer, values: Sequence[str] | None, *, write: bool) -> N
         db.attach(alias, path, write=write)
 
 
+def _read_text(file: Path, encoding: str) -> str:
+    """Read *file* as text, reporting a wrong encoding as a plain message."""
+    try:
+        return file.read_text(encoding=encoding)
+    except UnicodeDecodeError:
+        _fail(f"{file.name} is not valid {encoding} text")
+    except LookupError:
+        _fail(f"unknown encoding: {encoding}")
+    except OSError as error:
+        _fail(str(error))
+
+
+def _export_file_name(name: str, extension: str) -> str:
+    """A file name for *name* that cannot escape the directory it is written in."""
+    safe = _UNSAFE_IN_NAME.sub("_", name).lstrip(".")
+    return f"{safe or '_'}.{extension}"
+
+
 def _read_sql(sql: str | None, file: Path | None) -> list[str]:
-    if (sql is None) == (file is None):
+    if sql is not None and file is not None:
         _fail("give either an SQL statement or --file, not both")
+    if sql is None and file is None:
+        _fail("give an SQL statement, - to read it from stdin, or --file")
     if file is not None:
-        text = file.read_text(encoding="utf-8")
+        text = _read_text(file, "utf-8")
     elif sql == "-":
         text = sys.stdin.read()
     else:
@@ -722,11 +744,21 @@ def export(
     with _reporting_errors(), open_database(database) as db:
         if every:
             assert output is not None
-            output.mkdir(parents=True, exist_ok=True)
+            targets: dict[str, str] = {}
             for name in db.names():
-                target = output / f"{name}.{_EXTENSIONS[output_format]}"
-                with target.open("w", encoding="utf-8") as handle:
-                    write_rows(db.stream_rows(name), options, handle)
+                file_name = _export_file_name(name, _EXTENSIONS[output_format])
+                if file_name in targets:
+                    _fail(f"{name} and {targets[file_name]} both export to {file_name}")
+                targets[file_name] = name
+            output.mkdir(parents=True, exist_ok=True)
+            for file_name, name in targets.items():
+                target = output / file_name
+                try:
+                    with target.open("w", encoding="utf-8") as handle:
+                        write_rows(db.stream_rows(name), options, handle)
+                except ExplorerError as error:
+                    target.unlink(missing_ok=True)
+                    typer.secho(f"skipped {name}: {error}", err=True, fg=typer.colors.YELLOW)
             return
         assert table is not None
         if output is None:
@@ -762,15 +794,17 @@ def import_(
     delimiter: Annotated[
         str | None, typer.Option("--delimiter", help="Field delimiter for CSV/TSV.")
     ] = None,
+    encoding: Annotated[
+        str, typer.Option("--encoding", help="Encoding of the file.")
+    ] = "utf-8-sig",
 ) -> None:
     """Load a CSV, TSV or JSON file into a table, creating it if needed."""
     input_format = output_format or _FORMAT_BY_SUFFIX.get(file.suffix.lower())
     if input_format is None:
         _fail(f"cannot tell the format of {file.name}; pass --format")
+    text = _read_text(file, encoding)
     with _reporting_errors(), open_database(database, write=True) as db:
-        headers, raw_rows = parse_rows(
-            file.read_text(encoding="utf-8-sig"), input_format, delimiter=delimiter
-        )
+        headers, raw_rows = parse_rows(text, input_format, delimiter=delimiter)
         types = infer_types(raw_rows, len(headers))
         count = db.import_rows(
             table, list(zip(headers, types, strict=True)), coerce_rows(raw_rows, types)

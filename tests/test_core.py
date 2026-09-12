@@ -368,3 +368,15 @@ def test_dump_is_replayable(database: Path, tmp_path: Path) -> None:
         assert copy.execute("SELECT COUNT(*) FROM users").fetchone() == (3,)
     finally:
         copy.close()
+
+
+def test_stream_rows_reports_an_unreadable_object(database: Path) -> None:
+    connection = sqlite3.connect(database)
+    try:
+        connection.executescript("CREATE VIEW broken AS SELECT * FROM gone;")
+    finally:
+        connection.close()
+    with open_database(database) as db:
+        with pytest.raises(ExplorerError, match="no such table"):
+            db.stream_rows("broken")
+        assert db.tables().rows  # the rest of the database is still usable

@@ -141,8 +141,14 @@ sqlitexplorer diff app.db backup.db                      # exit status 1 when th
 ```
 
 `import` creates the table when it does not exist, inferring INTEGER, REAL or
-TEXT for each column; empty CSV cells become NULL. The format comes from the
-file extension unless `--format` is given.
+TEXT for each column; values with leading zeros and integers too large for
+SQLite stay TEXT, so codes such as `007` keep their digits. Empty CSV cells
+become NULL. The format comes from the file extension unless `--format` is
+given, and `--encoding` reads a file that is not UTF-8.
+
+`export --all` writes one file per table and view inside the directory: a name
+that would not be a valid file name is sanitised, and an object that cannot be
+read (a view over a dropped table) is skipped with a warning on stderr.
 
 ## Shell
 
@@ -174,26 +180,6 @@ uv pip install -e ".[dev]"
 uv run pytest
 uv run ruff check .
 ```
-
-## Releasing
-
-Releases are driven by version tags. Pushing `vX.Y.Z` runs the tests, builds
-the distributions, publishes them to PyPI with
-[trusted publishing](https://docs.pypi.org/trusted-publishers/) and creates a
-GitHub release with the artifacts attached.
-
-```sh
-uv version 0.3.0                      # or: uv version --bump minor
-git commit -am "Release 0.3.0"
-git tag v0.3.0
-git push origin master v0.3.0
-```
-
-The tag must match the version in `pyproject.toml`; the workflow refuses to
-publish otherwise. Before the first release, register the repository as a
-trusted publisher of the project on PyPI with the workflow name `release.yml`
-and the environment `pypi`, and create that environment in the repository
-settings on GitHub.
 
 ## License
 

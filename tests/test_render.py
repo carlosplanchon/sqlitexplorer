@@ -200,3 +200,31 @@ def test_infer_types_and_coerce_rows() -> None:
     types = infer_types(rows, 4)
     assert types == ["INTEGER", "REAL", "TEXT", "TEXT"]
     assert coerce_rows(rows, types) == [[1, 1.5, "x", None], [2, 2.0, "3", None]]
+
+
+def test_infer_types_keeps_codes_and_huge_integers_as_text() -> None:
+    rows = [["007", "0", "0.5", "99999999999999999999"]]
+    types = infer_types(rows, 4)
+    assert types == ["TEXT", "INTEGER", "REAL", "TEXT"]
+    assert coerce_rows(rows, types) == [["007", 0, 0.5, "99999999999999999999"]]
+
+
+def test_parse_rows_json_keeps_huge_integers_as_text() -> None:
+    _, rows = parse_rows('[{"n": 99999999999999999999}, {"n": 1}]', OutputFormat.JSON)
+    assert rows == [["99999999999999999999"], [1]]
+
+
+def test_parse_rows_reports_a_bad_delimiter_and_a_malformed_file() -> None:
+    with pytest.raises(ExplorerError, match="single character"):
+        parse_rows("a,b\n1,2\n", OutputFormat.CSV, delimiter=";;")
+    with pytest.raises(ExplorerError, match="cannot read the file"):
+        parse_rows("a\n" + "x" * 200_000 + "\n", OutputFormat.CSV)
+
+
+def test_page_footer_uses_the_singular_for_one_row() -> None:
+    one = ResultSet(columns=("id",), rows=[(1,)])
+    two = ResultSet(columns=("id",), rows=[(1,), (2,)])
+    assert paginate(one, page_size=5)[1] == "page 1 of 1 (1 row)"
+    assert paginate(two, page_size=5)[1] == "page 1 of 1 (2 rows)"
+    # A page counted in SQL takes the same path.
+    assert paginate(ResultSet(columns=("id",), total=1), page_size=5)[1] == "page 1 of 1 (1 row)"

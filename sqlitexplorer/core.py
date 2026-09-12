@@ -498,7 +498,10 @@ class Explorer:
             table, columns=columns, where=where, order_by=order_by, descending=descending
         )
         query = f"SELECT {selection} {source}{order} LIMIT ? OFFSET ?"
-        return self.stream(query, (-1 if limit is None else limit, offset))
+        try:
+            return self.stream(query, (-1 if limit is None else limit, offset))
+        except sqlite3.Error as error:
+            raise translate_error(error, write=self._write) from error
 
     def stats(
         self,
