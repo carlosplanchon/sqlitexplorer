@@ -7,7 +7,7 @@ other column is a numeric series. Histograms use the first column only.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -18,6 +18,7 @@ import plotille
 import plotilleresample
 
 from sqlitexplorer.core import ExplorerError, ResultSet, RowStream
+from sqlitexplorer.render import strip_ansi
 
 __all__ = [
     "ChartKind",
@@ -33,8 +34,11 @@ __all__ = [
 PALETTE = ("red", "green", "yellow", "blue", "magenta", "cyan")
 # plotille reserves this many characters for the Y axis label.
 AXIS_LABEL_WIDTH = 8
-# Characters taken by the Y axis (ticks, label and separator) next to the canvas.
-AXIS_WIDTH = 12
+# Characters the Y axis takes next to the canvas: ten for the tick, then
+# " | ". plotille writes past the canvas too, which _fit takes care of.
+AXIS_WIDTH = 13
+# Narrowest canvas worth drawing on when the labels ask for too much room.
+MIN_CANVAS = 10
 # A tuple, not bool | int | float: the union would be rebuilt on every call,
 # and this runs once per value of the result.
 _NUMERIC = (bool, int, float)
@@ -226,7 +230,23 @@ def _color_environment(enabled: bool) -> Iterator[None]:
 
 
 def _canvas_width(width: int) -> int:
-    return max(10, width - AXIS_WIDTH)
+    return max(MIN_CANVAS, width - AXIS_WIDTH)
+
+
+def _fit(draw: Callable[[int], str], width: int) -> str:
+    """Draw on the widest canvas whose longest line still fits in *width*.
+
+    plotille writes the X label and the tick numbers past the end of the
+    canvas, by an amount that depends on both, so the only way to know the
+    room they take is to draw and measure.
+    """
+    canvas = _canvas_width(width)
+    while True:
+        drawing = draw(canvas)
+        excess = max(len(strip_ansi(line)) for line in drawing.splitlines()) - width
+        if excess <= 0 or canvas <= MIN_CANVAS:
+            return drawing
+        canvas = max(MIN_CANVAS, canvas - excess)
 
 
 def render_chart(
@@ -240,21 +260,25 @@ def render_chart(
     y_label: str,
 ) -> str:
     """Draw *series* as a line chart or scatter plot, with a legend when there are several."""
-    figure = plotille.Figure()
-    figure.width = _canvas_width(width)
-    figure.height = max(3, height)
-    figure.with_colors = color
-    figure.color_mode = "names"
-    figure.x_label = x_label
-    figure.y_label = y_label[:AXIS_LABEL_WIDTH]
-    for index, item in enumerate(series):
-        line_color = PALETTE[index % len(PALETTE)] if color else None
-        if kind is ChartKind.SCATTER:
-            figure.scatter(item.x, item.y, lc=line_color, label=item.label)
-        else:
-            figure.plot(item.x, item.y, lc=line_color, label=item.label)
-    with _color_environment(color):
-        return figure.show(legend=len(series) > 1)
+
+    def draw(canvas: int) -> str:
+        figure = plotille.Figure()
+        figure.width = canvas
+        figure.height = max(3, height)
+        figure.with_colors = color
+        figure.color_mode = "names"
+        figure.x_label = x_label
+        figure.y_label = y_label[:AXIS_LABEL_WIDTH]
+        for index, item in enumerate(series):
+            line_color = PALETTE[index % len(PALETTE)] if color else None
+            if kind is ChartKind.SCATTER:
+                figure.scatter(item.x, item.y, lc=line_color, label=item.label)
+            else:
+                figure.plot(item.x, item.y, lc=line_color, label=item.label)
+        with _color_environment(color):
+            return figure.show(legend=len(series) > 1)
+
+    return _fit(draw, width)
 
 
 def render_histogram(
@@ -268,13 +292,18 @@ def render_histogram(
     y_label: str,
 ) -> str:
     """Draw the distribution of *values*."""
-    with _color_environment(color):
-        return plotille.histogram(
-            list(values),
-            bins=bins,
-            width=_canvas_width(width),
-            height=max(3, height),
-            X_label=x_label,
-            Y_label=y_label[:AXIS_LABEL_WIDTH],
-            lc=PALETTE[0] if color else None,
-        )
+    numbers = list(values)
+
+    def draw(canvas: int) -> str:
+        with _color_environment(color):
+            return plotille.histogram(
+                numbers,
+                bins=bins,
+                width=canvas,
+                height=max(3, height),
+                X_label=x_label,
+                Y_label=y_label[:AXIS_LABEL_WIDTH],
+                lc=PALETTE[0] if color else None,
+            )
+
+    return _fit(draw, width)

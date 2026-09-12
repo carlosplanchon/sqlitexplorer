@@ -7,7 +7,10 @@ from datetime import datetime
 import pytest
 
 from sqlitexplorer.charts import (
+    AXIS_WIDTH,
+    MIN_CANVAS,
     ChartKind,
+    Series,
     histogram_values,
     render_chart,
     render_histogram,
@@ -16,6 +19,7 @@ from sqlitexplorer.charts import (
     stream_series,
 )
 from sqlitexplorer.core import ExplorerError, ResultSet, RowStream
+from sqlitexplorer.render import strip_ansi
 
 
 def braille(text: str) -> bool:
@@ -227,3 +231,61 @@ def test_series_from_result_can_allow_an_empty_result() -> None:
     series, skipped = series_from_result(ResultSet(columns=("x", "y")), require_rows=False)
     assert [item.label for item in series] == ["y"]
     assert series[0].x == [] and skipped == 0
+
+
+def _widest(drawing: str) -> int:
+    return max(len(strip_ansi(line)) for line in drawing.splitlines())
+
+
+@pytest.mark.parametrize("width", [60, 80, 96, 120, 200])
+@pytest.mark.parametrize("x_label", ["t", "taken_at", "placed_at_utc"])
+def test_render_chart_never_draws_wider_than_the_terminal(width: int, x_label: str) -> None:
+    xs = [float(i) for i in range(400)]
+    series = [
+        Series(label="celsius", x=xs, y=[(i % 17) * 1.37 for i in range(400)]),
+        Series(label="humidity", x=xs, y=[60 - (i % 11) for i in range(400)]),
+    ]
+    for color in (False, True):
+        for one in (series[:1], series):
+            drawing = render_chart(
+                one,
+                kind=ChartKind.LINE,
+                width=width,
+                height=9,
+                color=color,
+                x_label=x_label,
+                y_label="value",
+            )
+            assert _widest(drawing) <= width, (width, x_label, color, len(one))
+
+
+@pytest.mark.parametrize("width", [40, 60, 80, 96, 120, 200])
+def test_render_histogram_never_draws_wider_than_the_terminal(width: int) -> None:
+    drawing = render_histogram(
+        [float(i % 97) for i in range(2000)],
+        bins=10,
+        width=width,
+        height=6,
+        color=False,
+        x_label="celsius",
+        y_label="count",
+    )
+    assert _widest(drawing) <= width
+
+
+def test_render_chart_stops_narrowing_at_the_floor() -> None:
+    # A label wider than the terminal cannot be made to fit, so the canvas
+    # narrows to MIN_CANVAS and stops there instead of shrinking to nothing.
+    series = [Series(label="v", x=[0.0, 1.0, 2.0], y=[0.0, 1.0, 0.5])]
+    drawing = render_chart(
+        series,
+        kind=ChartKind.LINE,
+        width=40,
+        height=5,
+        color=False,
+        x_label="a_label_far_too_long_for_this_terminal",
+        y_label="v",
+    )
+    body = [line for line in drawing.splitlines() if braille(line)]
+    assert body, drawing
+    assert max(len(line) for line in body) == MIN_CANVAS + AXIS_WIDTH
