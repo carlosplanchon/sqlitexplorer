@@ -33,6 +33,9 @@ PALETTE = ("red", "green", "yellow", "blue", "magenta", "cyan")
 AXIS_LABEL_WIDTH = 8
 # Characters taken by the Y axis (ticks, label and separator) next to the canvas.
 AXIS_WIDTH = 12
+# A tuple, not bool | int | float: the union would be rebuilt on every call,
+# and this runs once per value of the result.
+_NUMERIC = (bool, int, float)
 
 
 class ChartKind(str, Enum):
@@ -49,7 +52,7 @@ class Series:
 
 
 def _number(value: object) -> float | None:
-    if isinstance(value, bool | int | float):
+    if isinstance(value, _NUMERIC):
         return float(value)
     if isinstance(value, str):
         try:
@@ -84,8 +87,10 @@ def series_from_result(result: ResultSet) -> tuple[list[Series], int]:
     ys: list[list[float]] = [[] for _ in y_names]
     x_type: type | None = None
     skipped = 0
+    keep_x = xs.append
+    keep = [bucket.append for bucket in ys]
     for row in result.rows:
-        if any(value is None for value in row):
+        if None in row:
             skipped += 1
             continue
         x = _x_value(row[0])
@@ -95,15 +100,12 @@ def series_from_result(result: ResultSet) -> tuple[list[Series], int]:
             x_type = type(x)
         elif not isinstance(x, x_type):
             raise ExplorerError(f"column {x_name} mixes numbers and dates")
-        numbers = []
-        for name, value in zip(y_names, row[1:], strict=True):
+        for name, value, append in zip(y_names, row[1:], keep, strict=True):
             number = _number(value)
             if number is None:
                 raise ExplorerError(f"column {name} is not numeric: {value!r}")
-            numbers.append(number)
-        xs.append(x)
-        for bucket, number in zip(ys, numbers, strict=True):
-            bucket.append(number)
+            append(number)
+        keep_x(x)
     if not xs:
         raise ExplorerError("no rows to plot")
     return [
@@ -135,7 +137,7 @@ def resample_series(
 def histogram_values(result: ResultSet) -> tuple[list[float], int]:
     """Numeric values of the first column of *result*, and how many NULLs were skipped."""
     if not result.columns:
-        raise ExplorerError("no rows to plot")
+        raise ExplorerError("need a numeric column to plot")
     name = result.columns[0]
     values: list[float] = []
     skipped = 0

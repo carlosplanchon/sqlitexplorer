@@ -54,6 +54,8 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 _INTEGER = re.compile(r"^[+-]?\d+$")
 _REAL = re.compile(r"^[+-]?(\d+\.\d*|\.\d+|\d+)([eE][+-]?\d+)?$")
 _LEADING_ZERO = re.compile(r"^[+-]?0\d")
+# A tuple, not bool | int: the union would be rebuilt on every call.
+_INTEGRAL = (bool, int)
 # Integers outside this range do not fit in a SQLite INTEGER column.
 _INT64 = range(-(2**63), 2**63)
 
@@ -479,7 +481,7 @@ def _plain_json_value(value: object) -> object:
 
 
 def _classify(value: object) -> str:
-    if isinstance(value, bool | int):
+    if isinstance(value, _INTEGRAL):
         return "INTEGER"
     if isinstance(value, float):
         return "REAL"

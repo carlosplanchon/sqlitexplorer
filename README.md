@@ -98,7 +98,9 @@ their values wrapped so that every column and label stays visible. Use
 Big results do not need to fit in memory: `--page` fetches only the requested
 page (in SQL for `show`, from the cursor for `query`), and the csv, tsv, json
 and markdown formats, `export` and `dump` are written row by row. The table
-format is the exception, since it needs every row to size its columns.
+format is one exception, since it needs every row to size its columns, and
+`chart` is the other: it reads the whole result before reducing it to what the
+canvas can show.
 
 ## Queries
 

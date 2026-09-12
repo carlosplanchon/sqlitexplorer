@@ -71,6 +71,11 @@ def test_histogram_values_uses_first_column() -> None:
         histogram_values(ResultSet(columns=("v",), rows=[("x",)]))
 
 
+def test_histogram_values_requires_a_column() -> None:
+    with pytest.raises(ExplorerError, match="need a numeric column"):
+        histogram_values(ResultSet())
+
+
 def test_render_chart_prints_braille_without_colors() -> None:
     series, _ = series_from_result(ResultSet(columns=("x", "y"), rows=[(1, 1), (2, 3), (3, 2)]))
     text = render_chart(

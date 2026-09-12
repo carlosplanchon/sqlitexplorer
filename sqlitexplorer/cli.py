@@ -640,7 +640,8 @@ def chart(
         str,
         typer.Argument(
             show_default=False,
-            help="Query whose first column is X and the other numeric columns are series.",
+            help="Query whose first column is X and the other numeric columns are series,"
+            " or - to read it from stdin.",
         ),
     ],
     kind: Annotated[
