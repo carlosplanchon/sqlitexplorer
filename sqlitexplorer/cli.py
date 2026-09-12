@@ -28,8 +28,8 @@ from sqlitexplorer.charts import (
     histogram_values,
     render_chart,
     render_histogram,
-    resample_series,
     series_from_result,
+    stream_series,
 )
 from sqlitexplorer.completion import complete_table
 from sqlitexplorer.core import (
@@ -666,12 +666,13 @@ def chart(
     parameters = _parameters(params)
     with _reporting_errors(), open_database(database) as db:
         text = sys.stdin.read() if sql == "-" else sql
-        result = db.execute(text, parameters if parameters else ())
-        if not result.returns_rows:
-            _fail("the statement returned no rows")
+        bound = parameters if parameters else ()
         use_color = resolve_color(color)
         screen = width if width is not None else shutil.get_terminal_size().columns
         if kind is ChartKind.HIST:
+            result = db.execute(text, bound)
+            if not result.returns_rows:
+                _fail("the statement returned no rows")
             values, skipped = histogram_values(result)
             drawing = render_histogram(
                 values,
@@ -683,13 +684,23 @@ def chart(
                 y_label=y_label or "count",
             )
         else:
-            series, skipped = series_from_result(result)
             if resample:
-                rows = len(series[0].x)
-                series = resample_series(series, kind=kind, width=screen, height=height)
-                points = len(series[0].x)
-                if points < rows:
-                    typer.echo(f"resampled {rows} rows to {points} points", err=True)
+                # Reduces as it reads, so the rows never pile up in memory.
+                stream = db.stream(text, bound)
+                if not stream.returns_rows:
+                    _fail("the statement returned no rows")
+                columns = stream.columns
+                series, skipped, read = stream_series(
+                    stream, kind=kind, width=screen, height=height
+                )
+                if len(series[0].x) < read:
+                    typer.echo(f"resampled {read} rows to {len(series[0].x)} points", err=True)
+            else:
+                result = db.execute(text, bound)
+                if not result.returns_rows:
+                    _fail("the statement returned no rows")
+                columns = result.columns
+                series, skipped = series_from_result(result)
             default_y = series[0].label if len(series) == 1 else "value"
             drawing = render_chart(
                 series,
@@ -697,7 +708,7 @@ def chart(
                 width=screen,
                 height=height,
                 color=use_color,
-                x_label=x_label or result.columns[0],
+                x_label=x_label or columns[0],
                 y_label=y_label or default_y,
             )
         if skipped:

@@ -98,9 +98,9 @@ their values wrapped so that every column and label stays visible. Use
 Big results do not need to fit in memory: `--page` fetches only the requested
 page (in SQL for `show`, from the cursor for `query`), and the csv, tsv, json
 and markdown formats, `export` and `dump` are written row by row. The table
-format is one exception, since it needs every row to size its columns, and
-`chart` is the other: it reads the whole result before reducing it to what the
-canvas can show.
+format is the exception, since it needs every row to size its columns.
+`chart` reduces as it reads, so the memory it needs does not grow with the
+table; `chart --no-resample` is the one that holds every row.
 
 ## Queries
 
@@ -133,11 +133,13 @@ stderr. `--kind` selects `line` (default), `scatter` or `hist` (first column
 only, `--bins`). `--height`, `--width`, `--x-label`, `--y-label` and `--color`
 adjust the drawing.
 
-Line and scatter charts are reduced to what the canvas can show before they
-reach plotille, keeping the minimum and the maximum of every column of braille
-dots, so spikes survive and the drawing no longer costs more as the query grows;
-the reduction is reported on stderr. `--no-resample` sends every row instead.
-Histograms are never reduced, since dropping rows would change the distribution.
+Line and scatter charts are reduced to what the canvas can show, keeping the
+minimum and the maximum of every column of braille dots, so spikes survive and
+the true extremes keep the X of their own row. The rows are reduced as they are
+read, in chunks, so a chart over millions of rows needs no more memory than one
+over a thousand; the reduction is reported on stderr. `--no-resample` reads and
+plots every row instead. Histograms are never reduced, since dropping rows would
+change the distribution.
 
 ## Export, import, dump and diff
 

@@ -13,8 +13,9 @@ from sqlitexplorer.charts import (
     render_histogram,
     resample_series,
     series_from_result,
+    stream_series,
 )
-from sqlitexplorer.core import ExplorerError, ResultSet
+from sqlitexplorer.core import ExplorerError, ResultSet, RowStream
 
 
 def braille(text: str) -> bool:
@@ -152,3 +153,77 @@ def test_resample_series_scatter_keeps_more_points_than_a_line() -> None:
     line = resample_series(series, kind=ChartKind.LINE, width=80, height=15)
     scatter = resample_series(series, kind=ChartKind.SCATTER, width=80, height=15)
     assert len(scatter[0].x) > len(line[0].x)
+
+
+def _stream(columns: tuple[str, ...], rows: list[tuple]) -> RowStream:
+    return RowStream(columns=columns, rows=iter(rows))
+
+
+def test_stream_series_keeps_the_envelope_and_the_real_pairs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sqlitexplorer.charts._CHUNK", 50)
+    rows: list[tuple] = [(i, 0.0) for i in range(5000)]
+    rows[1234] = (1234, 999.0)
+    rows[4321] = (4321, -999.0)
+    series, skipped, read = stream_series(
+        _stream(("x", "y"), rows), kind=ChartKind.LINE, width=80, height=15
+    )
+    assert read == 5000
+    assert skipped == 0
+    assert len(series[0].x) < 5000
+    assert max(series[0].y) == 999.0
+    assert min(series[0].y) == -999.0
+    # The extremes keep the X of their own row, not a neighbour's.
+    assert series[0].x[series[0].y.index(999.0)] == 1234
+    assert series[0].x[series[0].y.index(-999.0)] == 4321
+    assert series[0].x == sorted(series[0].x)
+
+
+def test_stream_series_matches_the_collected_path_on_one_chunk() -> None:
+    rows = [(i, float(i % 97)) for i in range(4000)]
+    collected, _ = series_from_result(ResultSet(columns=("x", "y"), rows=rows))
+    collected = resample_series(collected, kind=ChartKind.LINE, width=80, height=15)
+    streamed, _, read = stream_series(
+        _stream(("x", "y"), rows), kind=ChartKind.LINE, width=80, height=15
+    )
+    assert read == 4000
+    assert streamed[0].x == collected[0].x
+    assert streamed[0].y == collected[0].y
+
+
+def test_stream_series_skips_nulls_across_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sqlitexplorer.charts._CHUNK", 10)
+    rows: list[tuple] = [(i, None) if 10 <= i < 20 else (i, float(i)) for i in range(100)]
+    series, skipped, read = stream_series(
+        _stream(("x", "y"), rows), kind=ChartKind.LINE, width=80, height=15
+    )
+    assert (read, skipped) == (100, 10)
+    assert min(series[0].y) == 0.0
+    assert max(series[0].y) == 99.0
+
+
+def test_stream_series_handles_dates_and_rejects_a_mix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("sqlitexplorer.charts._CHUNK", 10)
+    dates = [(f"2020-01-01T00:00:{i:02d}", float(i)) for i in range(60)]
+    series, _, read = stream_series(
+        _stream(("t", "v"), dates), kind=ChartKind.LINE, width=80, height=15
+    )
+    assert read == 60
+    assert all(isinstance(value, datetime) for value in series[0].x)
+    mixed = dates + [(5, 1.0)] * 10
+    with pytest.raises(ExplorerError, match="mixes numbers and dates"):
+        stream_series(_stream(("t", "v"), mixed), kind=ChartKind.LINE, width=80, height=15)
+
+
+def test_stream_series_rejects_an_empty_stream() -> None:
+    with pytest.raises(ExplorerError, match="no rows to plot"):
+        stream_series(_stream(("x", "y"), []), kind=ChartKind.LINE, width=80, height=15)
+
+
+def test_series_from_result_can_allow_an_empty_result() -> None:
+    series, skipped = series_from_result(ResultSet(columns=("x", "y")), require_rows=False)
+    assert [item.label for item in series] == ["y"]
+    assert series[0].x == [] and skipped == 0

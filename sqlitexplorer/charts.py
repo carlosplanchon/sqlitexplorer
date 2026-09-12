@@ -12,11 +12,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from itertools import islice
 
 import plotille
 import plotilleresample
 
-from sqlitexplorer.core import ExplorerError, ResultSet
+from sqlitexplorer.core import ExplorerError, ResultSet, RowStream
 
 __all__ = [
     "ChartKind",
@@ -26,6 +27,7 @@ __all__ = [
     "render_histogram",
     "resample_series",
     "series_from_result",
+    "stream_series",
 ]
 
 PALETTE = ("red", "green", "yellow", "blue", "magenta", "cyan")
@@ -36,6 +38,10 @@ AXIS_WIDTH = 12
 # A tuple, not bool | int | float: the union would be rebuilt on every call,
 # and this runs once per value of the result.
 _NUMERIC = (bool, int, float)
+# Rows read at a time when streaming, and how many reduced points may pile
+# up before they are reduced again.
+_CHUNK = 65536
+_PILE = 8
 
 
 class ChartKind(str, Enum):
@@ -74,11 +80,13 @@ def _x_value(value: object) -> float | datetime | None:
     return None
 
 
-def series_from_result(result: ResultSet) -> tuple[list[Series], int]:
+def series_from_result(result: ResultSet, *, require_rows: bool = True) -> tuple[list[Series], int]:
     """Split *result* into one series per numeric column after the first.
 
     Rows with a NULL in the X column or in any series are skipped; the second
-    item of the returned tuple counts them.
+    item of the returned tuple counts them. With *require_rows* false an empty
+    result yields empty series instead of raising, which is what the streaming
+    reader needs for a chunk that holds nothing usable.
     """
     if len(result.columns) < 2:
         raise ExplorerError("need an X column and at least one numeric column")
@@ -106,7 +114,7 @@ def series_from_result(result: ResultSet) -> tuple[list[Series], int]:
                 raise ExplorerError(f"column {name} is not numeric: {value!r}")
             append(number)
         keep_x(x)
-    if not xs:
+    if require_rows and not xs:
         raise ExplorerError("no rows to plot")
     return [
         Series(label=name, x=xs, y=bucket) for name, bucket in zip(y_names, ys, strict=True)
@@ -132,6 +140,50 @@ def resample_series(
         x, y = reduce(item.x, item.y, budget, height)
         reduced.append(Series(label=item.label, x=list(x), y=list(y)))
     return reduced
+
+
+def stream_series(
+    stream: RowStream, *, kind: ChartKind, width: int, height: int
+) -> tuple[list[Series], int, int]:
+    """Reduce *stream* to the canvas without ever holding every row.
+
+    Rows are read in chunks, each chunk is reduced on its own and the reduced
+    points are reduced again as they pile up, so the memory a chart needs stops
+    growing with the size of the table. Returns the series, how many rows were
+    skipped for their NULLs and how many were read.
+    """
+    reduced: list[Series] = []
+    x_type: type | None = None
+    skipped = rows_read = 0
+    while True:
+        rows = list(islice(stream.rows, _CHUNK))
+        if not rows:
+            break
+        rows_read += len(rows)
+        chunk, chunk_skipped = series_from_result(
+            ResultSet(columns=stream.columns, rows=rows), require_rows=False
+        )
+        skipped += chunk_skipped
+        if not chunk[0].x:
+            continue
+        if x_type is None:
+            x_type = type(chunk[0].x[0])
+        elif not isinstance(chunk[0].x[0], x_type):
+            raise ExplorerError(f"column {stream.columns[0]} mixes numbers and dates")
+        chunk = resample_series(chunk, kind=kind, width=width, height=height)
+        reduced = (
+            [
+                Series(label=old.label, x=old.x + new.x, y=old.y + new.y)
+                for old, new in zip(reduced, chunk, strict=True)
+            ]
+            if reduced
+            else chunk
+        )
+        if len(reduced[0].x) > _PILE * len(chunk[0].x):
+            reduced = resample_series(reduced, kind=kind, width=width, height=height)
+    if not reduced or not reduced[0].x:
+        raise ExplorerError("no rows to plot")
+    return resample_series(reduced, kind=kind, width=width, height=height), skipped, rows_read
 
 
 def histogram_values(result: ResultSet) -> tuple[list[float], int]:
