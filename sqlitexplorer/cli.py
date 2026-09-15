@@ -25,10 +25,10 @@ import typer
 from sqlitexplorer import __version__
 from sqlitexplorer.charts import (
     ChartKind,
-    histogram_values,
     render_chart,
     render_histogram,
     series_from_result,
+    stream_histogram,
     stream_series,
 )
 from sqlitexplorer.completion import complete_table
@@ -663,7 +663,12 @@ def chart(
         ),
     ] = True,
     x_label: Annotated[str | None, typer.Option("--x-label", help="Label of the X axis.")] = None,
-    y_label: Annotated[str | None, typer.Option("--y-label", help="Label of the Y axis.")] = None,
+    y_label: Annotated[
+        str | None,
+        typer.Option(
+            "--y-label", help="Label of the Y axis, at most 8 characters (plotille's limit)."
+        ),
+    ] = None,
     params: ParamOption = None,
     width: WidthOption = None,
     color: ColorOption = None,
@@ -676,17 +681,16 @@ def chart(
         use_color = resolve_color(color)
         screen = width if width is not None else shutil.get_terminal_size().columns
         if kind is ChartKind.HIST:
-            result = db.execute(text, bound)
-            if not result.returns_rows:
-                _fail("the statement returned no rows")
-            values, skipped = histogram_values(result)
+            # Two passes over the query, the range first and then the counts,
+            # so the values never pile up in memory.
+            histogram = stream_histogram(lambda: db.stream(text, bound), bins=bins)
+            skipped = histogram.skipped
             drawing = render_histogram(
-                values,
-                bins=bins,
+                histogram,
                 width=screen,
                 height=height,
                 color=use_color,
-                x_label=x_label or result.columns[0],
+                x_label=x_label or histogram.column,
                 y_label=y_label or "count",
             )
         else:
@@ -838,7 +842,10 @@ def import_(
     text = _read_text(file, encoding)
     with _reporting_errors(), open_database(database, write=True) as db:
         headers, raw_rows = parse_rows(text, input_format, delimiter=delimiter)
-        types = infer_types(raw_rows, len(headers))
+        # A JSON file brings its own types; a CSV only has text to go by.
+        types = infer_types(
+            raw_rows, len(headers), parse_text=input_format is not OutputFormat.JSON
+        )
         count = db.import_rows(
             table, list(zip(headers, types, strict=True)), coerce_rows(raw_rows, types)
         )

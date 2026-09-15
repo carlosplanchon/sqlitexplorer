@@ -704,6 +704,19 @@ def test_import_into_existing_table_and_json(
     ]
 
 
+def test_import_json_keeps_strings_as_text(
+    invoke: Callable, database: Path, tmp_path: Path
+) -> None:
+    source = tmp_path / "typed.json"
+    source.write_text('[{"zip": "12345", "n": 7}, {"zip": "67890", "n": 8}]')
+    result = invoke("import", database, "typed", source)
+    assert result.exit_code == 0
+    described = invoke("describe", database, "typed", "-f", "csv").output.splitlines()
+    assert [line.split(",")[2] for line in described[1:]] == ["TEXT", "INTEGER"]
+    rows = invoke("query", database, "SELECT typeof(zip), zip FROM typed ORDER BY zip", "-f", "csv")
+    assert rows.output.splitlines() == ["typeof(zip),zip", "text,12345", "text,67890"]
+
+
 def test_import_rolls_back_on_error(invoke: Callable, database: Path, tmp_path: Path) -> None:
     source = tmp_path / "bad.csv"
     source.write_text("x,y\n1,2\n")

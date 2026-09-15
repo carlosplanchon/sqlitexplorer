@@ -4,18 +4,21 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import plotille
 import pytest
 
 from sqlitexplorer.charts import (
     AXIS_WIDTH,
     MIN_CANVAS,
     ChartKind,
+    Histogram,
     Series,
-    histogram_values,
+    _draw_histogram,
     render_chart,
     render_histogram,
     resample_series,
     series_from_result,
+    stream_histogram,
     stream_series,
 )
 from sqlitexplorer.core import ExplorerError, ResultSet, RowStream
@@ -67,20 +70,6 @@ def test_series_requires_two_columns() -> None:
         series_from_result(ResultSet(columns=("x",), rows=[(1,)]))
 
 
-def test_histogram_values_uses_first_column() -> None:
-    result = ResultSet(columns=("v", "other"), rows=[(1, "a"), (None, "b"), (2.5, "c")])
-    values, skipped = histogram_values(result)
-    assert values == [1.0, 2.5]
-    assert skipped == 1
-    with pytest.raises(ExplorerError, match="not numeric"):
-        histogram_values(ResultSet(columns=("v",), rows=[("x",)]))
-
-
-def test_histogram_values_requires_a_column() -> None:
-    with pytest.raises(ExplorerError, match="need a numeric column"):
-        histogram_values(ResultSet())
-
-
 def test_render_chart_prints_braille_without_colors() -> None:
     series, _ = series_from_result(ResultSet(columns=("x", "y"), rows=[(1, 1), (2, 3), (3, 2)]))
     text = render_chart(
@@ -108,15 +97,6 @@ def test_render_chart_single_point_does_not_crash() -> None:
         series, kind=ChartKind.LINE, width=40, height=5, color=False, x_label="x", y_label="y"
     )
     assert braille(text)
-
-
-def test_render_histogram() -> None:
-    text = render_histogram(
-        [1.0, 2.0, 2.0, 3.0], bins=3, width=50, height=6, color=False, x_label="v", y_label="count"
-    )
-    assert braille(text)
-    assert "(v)" in text
-    assert "\x1b[" not in text
 
 
 def test_resample_series_reduces_and_keeps_the_extremes() -> None:
@@ -161,6 +141,68 @@ def test_resample_series_scatter_keeps_more_points_than_a_line() -> None:
 
 def _stream(columns: tuple[str, ...], rows: list[tuple]) -> RowStream:
     return RowStream(columns=columns, rows=iter(rows))
+
+
+def _histogram(values: list[object], bins: int = 3) -> Histogram:
+    return stream_histogram(lambda: _stream(("v", "other"), [(v, "x") for v in values]), bins=bins)
+
+
+def test_stream_histogram_counts_the_first_column_in_two_passes() -> None:
+    opened = 0
+
+    def open_stream() -> RowStream:
+        nonlocal opened
+        opened += 1
+        return _stream(("v", "other"), [(1, "a"), (None, "b"), (2.5, "c"), (4, "d")])
+
+    histogram = stream_histogram(open_stream, bins=3)
+    assert opened == 2
+    assert histogram.column == "v"
+    assert histogram.skipped == 1
+    assert histogram.edges == [1.0, 2.0, 3.0, 4.0]
+    assert histogram.counts == [1, 1, 1]  # the last bin is closed: 4 lands in it
+
+
+def test_stream_histogram_single_value_gets_a_unit_range() -> None:
+    histogram = _histogram([7, 7, 7], bins=2)
+    assert histogram.edges == [6.5, 7.0, 7.5]
+    assert histogram.counts == [0, 3]
+
+
+def test_stream_histogram_rejects_bad_input() -> None:
+    with pytest.raises(ExplorerError, match="not numeric"):
+        _histogram(["x"])
+    with pytest.raises(ExplorerError, match="no rows to plot"):
+        _histogram([None, None])
+    with pytest.raises(ExplorerError, match="returned no rows"):
+        stream_histogram(lambda: RowStream(), bins=3)
+
+
+def test_render_histogram() -> None:
+    histogram = _histogram([1.0, 2.0, 2.0, 3.0])
+    text = render_histogram(
+        histogram, width=50, height=6, color=False, x_label="v", y_label="count"
+    )
+    assert braille(text)
+    assert "(v)" in text
+    assert "\x1b[" not in text
+    colored = render_histogram(
+        histogram, width=50, height=6, color=True, x_label="v", y_label="count"
+    )
+    assert "\x1b[" in colored
+
+
+def test_render_histogram_matches_plotille(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The counts are fed to plotille's own Histogram plot, so a plotille
+    # release that changes how it keeps them would show up here.
+    monkeypatch.setenv("NO_COLOR", "1")
+    values = [float(i % 97) for i in range(2000)] + [3.5, 3.5, 96.0]
+    ours = _draw_histogram(
+        _histogram(values, bins=12), canvas=50, height=8, color=False, x_label="v", y_label="count"
+    )
+    theirs = plotille.histogram(values, bins=12, width=50, height=8, X_label="v", Y_label="count")
+    assert ours == theirs
+    assert braille(ours)
 
 
 def test_stream_series_keeps_the_envelope_and_the_real_pairs(
@@ -262,8 +304,7 @@ def test_render_chart_never_draws_wider_than_the_terminal(width: int, x_label: s
 @pytest.mark.parametrize("width", [40, 60, 80, 96, 120, 200])
 def test_render_histogram_never_draws_wider_than_the_terminal(width: int) -> None:
     drawing = render_histogram(
-        [float(i % 97) for i in range(2000)],
-        bins=10,
+        _histogram([float(i % 97) for i in range(2000)], bins=10),
         width=width,
         height=6,
         color=False,
@@ -289,3 +330,37 @@ def test_render_chart_stops_narrowing_at_the_floor() -> None:
     body = [line for line in drawing.splitlines() if braille(line)]
     assert body, drawing
     assert max(len(line) for line in body) == MIN_CANVAS + AXIS_WIDTH
+
+
+def test_render_chart_draws_the_full_series_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The canvas is found on a two-point stand-in; the real points are drawn once.
+    lengths: list[int] = []
+    original = plotille.Figure.plot
+
+    def recording(self: plotille.Figure, X: list, Y: list, **kwargs: object) -> None:
+        lengths.append(len(X))
+        original(self, X, Y, **kwargs)
+
+    monkeypatch.setattr(plotille.Figure, "plot", recording)
+    xs = [float(i) for i in range(1000)]
+    render_chart(
+        [Series(label="v", x=xs, y=[i % 7 for i in range(1000)])],
+        kind=ChartKind.LINE,
+        width=80,
+        height=9,
+        color=False,
+        x_label="t",
+        y_label="v",
+    )
+    assert lengths.count(1000) == 1
+    assert set(lengths) == {2, 1000}
+
+
+def test_resample_series_scatter_keeps_an_isolated_spike() -> None:
+    rows: list[tuple] = [(i, 0.0) for i in range(50_000)]
+    rows[12_347] = (12_347, 999.0)
+    series, _ = series_from_result(ResultSet(columns=("x", "y"), rows=rows))
+    reduced = resample_series(series, kind=ChartKind.SCATTER, width=80, height=15)
+    assert len(reduced[0].x) < 50_000
+    assert 999.0 in reduced[0].y
+    assert reduced[0].x[reduced[0].y.index(999.0)] == 12_347

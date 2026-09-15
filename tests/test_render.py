@@ -167,6 +167,7 @@ def test_parse_number() -> None:
     assert parse_number("007") == 7
     assert parse_number("abc") == "abc"
     assert parse_number("1_000") == "1_000"
+    assert parse_number("١٢٣") == "١٢٣"  # digits of other scripts are not numbers
 
 
 def test_parse_rows_csv_and_json() -> None:
@@ -200,6 +201,14 @@ def test_infer_types_and_coerce_rows() -> None:
     types = infer_types(rows, 4)
     assert types == ["INTEGER", "REAL", "TEXT", "TEXT"]
     assert coerce_rows(rows, types) == [[1, 1.5, "x", None], [2, 2.0, "3", None]]
+    # JSON brings its own types: a string stays TEXT whatever it looks like.
+    assert infer_types([["1", 2.5, True, None]], 4, parse_text=False) == [
+        "TEXT",
+        "REAL",
+        "INTEGER",
+        "TEXT",
+    ]
+    assert infer_types([["١٢٣"]], 1) == ["TEXT"]
 
 
 def test_infer_types_keeps_codes_and_huge_integers_as_text() -> None:

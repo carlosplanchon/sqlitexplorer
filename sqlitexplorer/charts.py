@@ -6,6 +6,7 @@ other column is a numeric series. Histograms use the first column only.
 
 from __future__ import annotations
 
+import functools
 import os
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -13,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from itertools import islice
+from typing import NamedTuple
 
 import plotille
 import plotilleresample
@@ -22,12 +24,13 @@ from sqlitexplorer.render import strip_ansi
 
 __all__ = [
     "ChartKind",
+    "Histogram",
     "Series",
-    "histogram_values",
     "render_chart",
     "render_histogram",
     "resample_series",
     "series_from_result",
+    "stream_histogram",
     "stream_series",
 ]
 
@@ -39,9 +42,9 @@ AXIS_LABEL_WIDTH = 8
 AXIS_WIDTH = 13
 # Narrowest canvas worth drawing on when the labels ask for too much room.
 MIN_CANVAS = 10
-# A tuple, not bool | int | float: the union would be rebuilt on every call,
-# and this runs once per value of the result.
-_NUMERIC = (bool, int, float)
+# A tuple, not int | float: the union would be rebuilt on every call, and
+# this runs once per value of the result. bool is an int.
+_NUMERIC = (int, float)
 # Rows read at a time when streaming, and how many reduced points may pile
 # up before they are reduced again.
 _CHUNK = 65536
@@ -59,6 +62,15 @@ class Series:
     label: str
     x: list[float | datetime]
     y: list[float]
+
+
+class Histogram(NamedTuple):
+    """Counts of the first column of a query, in the bins plotille would draw."""
+
+    counts: list[int]
+    edges: list[float]
+    column: str
+    skipped: int
 
 
 def _number(value: object) -> float | None:
@@ -131,11 +143,12 @@ def resample_series(
     """Reduce every series to the points the canvas can actually draw.
 
     min/max keeps the extremes of every bucket, so spikes survive, and it only
-    indexes X, which the LTTB resamplers cannot do when X is a date.
+    indexes X, which the LTTB resamplers cannot do when X is a date. A scatter
+    plot gets a uniform stride for its density plus those extremes.
     """
     budget = _canvas_width(width)
     reduce = (
-        plotilleresample.resample_scatter
+        plotilleresample.resample_scatter_minmax
         if kind is ChartKind.SCATTER
         else plotilleresample.resample_plot_minmax
     )
@@ -190,24 +203,51 @@ def stream_series(
     return resample_series(reduced, kind=kind, width=width, height=height), skipped, rows_read
 
 
-def histogram_values(result: ResultSet) -> tuple[list[float], int]:
-    """Numeric values of the first column of *result*, and how many NULLs were skipped."""
-    if not result.columns:
-        raise ExplorerError("need a numeric column to plot")
-    name = result.columns[0]
-    values: list[float] = []
+def stream_histogram(open_stream: Callable[[], RowStream], *, bins: int) -> Histogram:
+    """Count the first column of a query into *bins* without holding its values.
+
+    The query runs twice: the first pass validates the values and finds their
+    range, the second counts them, so only the counts stay in memory. The
+    bins are the ones plotille computes from the raw values: equal widths
+    from the minimum to the maximum, the last one closed. ``skipped`` counts
+    the rows whose first column was NULL.
+    """
+    first = open_stream()
+    if not first.returns_rows:
+        raise ExplorerError("the statement returned no rows")
+    column = first.columns[0]
+    low = high = None
     skipped = 0
-    for row in result.rows:
-        if row[0] is None:
-            skipped += 1
-            continue
-        number = _number(row[0])
+    for row in first.rows:
+        number = _histogram_value(row[0], column)
         if number is None:
-            raise ExplorerError(f"column {name} is not numeric: {row[0]!r}")
-        values.append(number)
-    if not values:
+            skipped += 1
+        elif low is None or high is None:
+            low = high = number
+        else:
+            low, high = min(low, number), max(high, number)
+    if low is None or high is None:
         raise ExplorerError("no rows to plot")
-    return values, skipped
+    if low == high:
+        low, high = low - 0.5, high + 0.5
+    step = (high - low) / bins
+    counts = [0] * bins
+    for row in open_stream().rows:
+        number = _histogram_value(row[0], column)
+        if number is not None:
+            # Clamped: a query that is not deterministic may not repeat its range.
+            counts[max(0, min(bins - 1, int((number - low) // step)))] += 1
+    edges = [low + index * step for index in range(bins + 1)]
+    return Histogram(counts, edges, column, skipped)
+
+
+def _histogram_value(value: object, column: str) -> float | None:
+    if value is None:
+        return None
+    number = _number(value)
+    if number is None:
+        raise ExplorerError(f"column {column} is not numeric: {value!r}")
+    return number
 
 
 @contextmanager
@@ -233,19 +273,31 @@ def _canvas_width(width: int) -> int:
     return max(MIN_CANVAS, width - AXIS_WIDTH)
 
 
-def _fit(draw: Callable[[int], str], width: int) -> str:
+def _fit(
+    draw: Callable[[int], str], width: int, *, probe: Callable[[int], str] | None = None
+) -> str:
     """Draw on the widest canvas whose longest line still fits in *width*.
 
     plotille writes the X label and the tick numbers past the end of the
     canvas, by an amount that depends on both, so the only way to know the
-    room they take is to draw and measure.
+    room they take is to draw and measure. That room does not depend on the
+    number of points, so *probe*, a drawing with the same labels and the same
+    ranges but two points per series, finds the canvas cheaply and *draw*
+    then runs once.
     """
     canvas = _canvas_width(width)
+    if probe is not None:
+        canvas = _narrow(probe, width, canvas)[1]
+    return _narrow(draw, width, canvas)[0]
+
+
+def _narrow(draw: Callable[[int], str], width: int, canvas: int) -> tuple[str, int]:
+    """Shrink *canvas* until the drawing fits in *width*; return the drawing and its canvas."""
     while True:
         drawing = draw(canvas)
         excess = max(len(strip_ansi(line)) for line in drawing.splitlines()) - width
         if excess <= 0 or canvas <= MIN_CANVAS:
-            return drawing
+            return drawing, canvas
         canvas = max(MIN_CANVAS, canvas - excess)
 
 
@@ -260,50 +312,81 @@ def render_chart(
     y_label: str,
 ) -> str:
     """Draw *series* as a line chart or scatter plot, with a legend when there are several."""
-
-    def draw(canvas: int) -> str:
-        figure = plotille.Figure()
-        figure.width = canvas
-        figure.height = max(3, height)
-        figure.with_colors = color
-        figure.color_mode = "names"
-        figure.x_label = x_label
-        figure.y_label = y_label[:AXIS_LABEL_WIDTH]
-        for index, item in enumerate(series):
-            line_color = PALETTE[index % len(PALETTE)] if color else None
-            if kind is ChartKind.SCATTER:
-                figure.scatter(item.x, item.y, lc=line_color, label=item.label)
-            else:
-                figure.plot(item.x, item.y, lc=line_color, label=item.label)
-        with _color_environment(color):
-            return figure.show(legend=len(series) > 1)
-
-    return _fit(draw, width)
+    draw = functools.partial(
+        _draw_series, kind=kind, height=height, color=color, x_label=x_label, y_label=y_label
+    )
+    return _fit(
+        lambda canvas: draw(series, canvas=canvas),
+        width,
+        probe=lambda canvas: draw(_extremes(series), canvas=canvas),
+    )
 
 
-def render_histogram(
-    values: Sequence[float],
+def _figure(
+    *, canvas: int, height: int, color: bool, x_label: str, y_label: str
+) -> plotille.Figure:
+    figure = plotille.Figure()
+    figure.width = canvas
+    figure.height = max(3, height)
+    figure.with_colors = color
+    figure.color_mode = "names"
+    figure.x_label = x_label
+    figure.y_label = y_label[:AXIS_LABEL_WIDTH]
+    return figure
+
+
+def _draw_series(
+    series: Sequence[Series],
     *,
-    bins: int,
-    width: int,
+    kind: ChartKind,
+    canvas: int,
     height: int,
     color: bool,
     x_label: str,
     y_label: str,
 ) -> str:
-    """Draw the distribution of *values*."""
-    numbers = list(values)
+    figure = _figure(canvas=canvas, height=height, color=color, x_label=x_label, y_label=y_label)
+    for index, item in enumerate(series):
+        line_color = PALETTE[index % len(PALETTE)] if color else None
+        if kind is ChartKind.SCATTER:
+            figure.scatter(item.x, item.y, lc=line_color, label=item.label)
+        else:
+            figure.plot(item.x, item.y, lc=line_color, label=item.label)
+    with _color_environment(color):
+        return figure.show(legend=len(series) > 1)
 
-    def draw(canvas: int) -> str:
-        with _color_environment(color):
-            return plotille.histogram(
-                numbers,
-                bins=bins,
-                width=canvas,
-                height=max(3, height),
-                X_label=x_label,
-                Y_label=y_label[:AXIS_LABEL_WIDTH],
-                lc=PALETTE[0] if color else None,
-            )
 
-    return _fit(draw, width)
+def _extremes(series: Sequence[Series]) -> list[Series]:
+    """Two points per series, on the same ranges: enough to lay the axes out."""
+    return [
+        Series(label=item.label, x=[min(item.x), max(item.x)], y=[min(item.y), max(item.y)])
+        for item in series
+    ]
+
+
+def render_histogram(
+    histogram: Histogram, *, width: int, height: int, color: bool, x_label: str, y_label: str
+) -> str:
+    """Draw *histogram* the way plotille draws one from the raw values."""
+    draw = functools.partial(
+        _draw_histogram, histogram, height=height, color=color, x_label=x_label, y_label=y_label
+    )
+    return _fit(lambda canvas: draw(canvas=canvas), width)
+
+
+def _draw_histogram(
+    histogram: Histogram, *, canvas: int, height: int, color: bool, x_label: str, y_label: str
+) -> str:
+    figure = _figure(canvas=canvas, height=height, color=color, x_label=x_label, y_label=y_label)
+    # plotille only bins raw values, but its Histogram plot keeps the counts
+    # apart from them and draws from the counts alone: the two edges give it
+    # the same range, hence the same bins, and the real counts then replace
+    # the ones it took from those two values.
+    figure.histogram(
+        [histogram.edges[0], histogram.edges[-1]],
+        bins=len(histogram.counts),
+        lc=PALETTE[0] if color else None,
+    )
+    figure._plots[-1].frequencies = list(histogram.counts)
+    with _color_environment(color):
+        return figure.show()

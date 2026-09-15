@@ -51,11 +51,11 @@ __all__ = [
 
 ELLIPSIS = "…"
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
-_INTEGER = re.compile(r"^[+-]?\d+$")
-_REAL = re.compile(r"^[+-]?(\d+\.\d*|\.\d+|\d+)([eE][+-]?\d+)?$")
-_LEADING_ZERO = re.compile(r"^[+-]?0\d")
-# A tuple, not bool | int: the union would be rebuilt on every call.
-_INTEGRAL = (bool, int)
+# ASCII digits only: \d also matches the digits of other scripts, which
+# int() would happily convert.
+_INTEGER = re.compile(r"^[+-]?[0-9]+$")
+_REAL = re.compile(r"^[+-]?([0-9]+\.[0-9]*|\.[0-9]+|[0-9]+)([eE][+-]?[0-9]+)?$")
+_LEADING_ZERO = re.compile(r"^[+-]?0[0-9]")
 # Integers outside this range do not fit in a SQLite INTEGER column.
 _INT64 = range(-(2**63), 2**63)
 
@@ -195,7 +195,9 @@ def render_table(
     columns = list(result.columns)
 
     screen = width if width is not None else shutil.get_terminal_size().columns
-    # outfancy keeps a two-column margin and one separator per column.
+    # One separator per column, plus two columns of margin: outfancy needs
+    # none when the widths are given, but its own corrector leaves the same
+    # two, and a console that wraps on the last column would add blank lines.
     available = screen - 2 - len(columns)
     widths = fit_widths(columns, _natural_widths(columns, rows), available)
     return table.render(data=rows, label_list=columns, width=widths, screen_x=width)
@@ -480,11 +482,13 @@ def _plain_json_value(value: object) -> object:
     return value
 
 
-def _classify(value: object) -> str:
-    if isinstance(value, _INTEGRAL):
+def _classify(value: object, *, parse_text: bool) -> str:
+    if isinstance(value, int):  # bool is an int
         return "INTEGER"
     if isinstance(value, float):
         return "REAL"
+    if not parse_text:
+        return "TEXT"
     text = str(value).strip()
     if _LEADING_ZERO.match(text):
         # 007 is a code, not a number: storing it as one would drop the zeros.
@@ -496,8 +500,15 @@ def _classify(value: object) -> str:
     return "TEXT"
 
 
-def infer_types(rows: Sequence[Sequence[object]], count: int) -> list[str]:
-    """Pick INTEGER, REAL or TEXT for each of the *count* columns from the values seen."""
+def infer_types(
+    rows: Sequence[Sequence[object]], count: int, *, parse_text: bool = True
+) -> list[str]:
+    """Pick INTEGER, REAL or TEXT for each of the *count* columns from the values seen.
+
+    With *parse_text*, textual values that look like numbers count as numbers,
+    which is what a CSV needs. Without it they stay TEXT: a JSON string is a
+    string whatever it holds, and its numbers already come as numbers.
+    """
     rank = {"INTEGER": 0, "REAL": 1, "TEXT": 2}
     types = ["INTEGER"] * count
     seen = [False] * count
@@ -507,7 +518,7 @@ def infer_types(rows: Sequence[Sequence[object]], count: int) -> list[str]:
             if value is None:
                 continue
             seen[index] = True
-            kind = _classify(value)
+            kind = _classify(value, parse_text=parse_text)
             if rank[kind] > rank[types[index]]:
                 types[index] = kind
     return [kind if was_seen else "TEXT" for kind, was_seen in zip(types, seen, strict=True)]

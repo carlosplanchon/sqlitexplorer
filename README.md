@@ -20,10 +20,11 @@ with [plotille](https://github.com/tammoippen/plotille), resampled by
 Requires Python 3.10 or newer.
 
 ```sh
-# From a clone of this repository:
-uv tool install .
+uv tool install sqlitexplorer
 # or with pip:
-pip install .
+pip install sqlitexplorer
+# or from a clone of this repository:
+uv tool install .
 ```
 
 ## Quick tour
@@ -99,8 +100,9 @@ Big results do not need to fit in memory: `--page` fetches only the requested
 page (in SQL for `show`, from the cursor for `query`), and the csv, tsv, json
 and markdown formats, `export` and `dump` are written row by row. The table
 format is the exception, since it needs every row to size its columns.
-`chart` reduces as it reads, so the memory it needs does not grow with the
-table; `chart --no-resample` is the one that holds every row.
+`chart` reduces as it reads, and a histogram counts as it reads, so the memory
+they need does not grow with the table; `chart --no-resample` is the one that
+holds every row.
 
 ## Queries
 
@@ -131,15 +133,18 @@ The first column is the X axis (numbers or ISO dates), every other column is a
 series named after the column; rows with NULLs are skipped and counted on
 stderr. `--kind` selects `line` (default), `scatter` or `hist` (first column
 only, `--bins`). `--height`, `--width`, `--x-label`, `--y-label` and `--color`
-adjust the drawing.
+adjust the drawing; the Y label is cut to eight characters, the room plotille
+gives it.
 
 Line and scatter charts are reduced to what the canvas can show, keeping the
 minimum and the maximum of every column of braille dots, so spikes survive and
-the true extremes keep the X of their own row. The rows are reduced as they are
+the true extremes keep the X of their own row; a scatter plot keeps a uniform
+sample of its points as well, for its density. The rows are reduced as they are
 read, in chunks, so a chart over millions of rows needs no more memory than one
 over a thousand; the reduction is reported on stderr. `--no-resample` reads and
 plots every row instead. Histograms are never reduced, since dropping rows would
-change the distribution.
+change the distribution: the query runs twice, once for the range and once for
+the counts, so they do not hold the rows either.
 
 ## Export, import, dump and diff
 
@@ -153,8 +158,10 @@ sqlitexplorer diff app.db backup.db                      # exit status 1 when th
 
 `import` creates the table when it does not exist, inferring INTEGER, REAL or
 TEXT for each column; values with leading zeros and integers too large for
-SQLite stay TEXT, so codes such as `007` keep their digits. Empty CSV cells
-become NULL. The format comes from the file extension unless `--format` is
+SQLite stay TEXT, so codes such as `007` keep their digits. From JSON the types
+are the JSON types: numbers become INTEGER or REAL and strings stay TEXT even
+when they look like numbers, so a json export imports back as it was. Empty CSV
+cells become NULL. The format comes from the file extension unless `--format` is
 given, and `--encoding` reads a file that is not UTF-8.
 
 `export --all` writes one file per table and view inside the directory: a name
