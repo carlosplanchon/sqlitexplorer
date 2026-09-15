@@ -94,11 +94,11 @@ wheels = [
 
 [[package]]
 name = "plotilleresample"
-version = "1.0.3"
+version = "1.2.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/0d/a2/964c676752596b347762fc0df630d7513b11ed5b5c2ad6b2e10b5070acd2/plotilleresample-1.0.3.tar.gz", hash = "sha256:2d63216cad4c67665611f17b2fbbd2297fc169bcd75789211de37e9691a7247a", size = 8013, upload-time = "2026-09-12T19:14:42.842Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/12/08/0000b45c1753adf2ddec252847297de9d0dc0582aee6c4a3789df48c2f4b/plotilleresample-1.2.0.tar.gz", hash = "sha256:986e71381ea51907299829ec94f43b01f752bd35ce6ad2ff52cab8e18adc3fae", size = 9888, upload-time = "2026-09-15T01:09:55.575Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/52/69/f9d998da1ac791f2df85eff0c635d65dbffc62e0bc179cb842695c0f6371/plotilleresample-1.0.3-py3-none-any.whl", hash = "sha256:dba3a3cac55b338cc31eb346c420449a4d729ae66a74542883669da52d053c3e", size = 6918, upload-time = "2026-09-12T19:14:41.904Z" },
+    { url = "https://files.pythonhosted.org/packages/87/bb/d96a0f7a83f5e081f37af933c19e996f38c7f1f0eaf4c49ece10bf4455e6/plotilleresample-1.2.0-py3-none-any.whl", hash = "sha256:721ffedf2b1a44dd1586647eea21347e18128a085e954fac9b533366bfdb0a3c", size = 7663, upload-time = "2026-09-15T01:09:54.477Z" },
 ]
 
 [[package]]
@@ -186,7 +186,7 @@ wheels = [
 
 [[package]]
 name = "sqlitexplorer"
-version = "1.1.0"
+version = "1.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "outfancy" },
@@ -205,7 +205,7 @@ dev = [
 requires-dist = [
     { name = "outfancy", specifier = ">=0.11" },
     { name = "plotille", specifier = ">=6" },
-    { name = "plotilleresample", specifier = ">=1.0" },
+    { name = "plotilleresample", specifier = ">=1.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "typer", specifier = ">=0.12" },
