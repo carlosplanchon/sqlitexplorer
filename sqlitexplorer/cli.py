@@ -203,9 +203,15 @@ def _fail(message: str) -> NoReturn:
 
 @contextmanager
 def _reporting_errors() -> Iterator[None]:
-    """Turn ExplorerError and OSError into a message on stderr and exit status 1."""
+    """Turn ExplorerError and OSError into a message on stderr and exit status 1.
+
+    A closed pipe (``| head`` stopped reading) is not an error to report: it
+    is left to Typer, which ends the command quietly.
+    """
     try:
         yield
+    except BrokenPipeError:
+        raise
     except ExplorerError as error:
         _fail(_error_message(error))
     except OSError as error:
@@ -693,8 +699,9 @@ def chart(
                 series, skipped, read = stream_series(
                     stream, kind=kind, width=screen, height=height
                 )
-                if len(series[0].x) < read:
-                    typer.echo(f"resampled {read} rows to {len(series[0].x)} points", err=True)
+                plotted, points = read - skipped, len(series[0].x)
+                if points < plotted:
+                    typer.echo(f"resampled {plotted} rows to {points} points", err=True)
             else:
                 result = db.execute(text, bound)
                 if not result.returns_rows:

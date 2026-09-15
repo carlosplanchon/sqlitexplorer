@@ -8,9 +8,10 @@ that should reach the user as a plain message is raised as
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from itertools import islice
 from pathlib import Path
@@ -100,10 +101,16 @@ class StatsReport(NamedTuple):
 
 
 def _rows_of(cursor: sqlite3.Cursor) -> Iterator[tuple]:
+    # Not ``yield from``: closing the generator would then close the cursor
+    # itself, outside the ``finally`` below.
     try:
-        yield from cursor
+        for row in cursor:  # noqa: UP028
+            yield row
     finally:
-        cursor.close()
+        # A stream cut short by an error, Ctrl-C or a closed pipe is finalised
+        # after the connection is closed, which already released the cursor.
+        with suppress(sqlite3.ProgrammingError):
+            cursor.close()
 
 
 def _window(stream: RowStream, page: Page) -> ResultSet:
@@ -129,7 +136,8 @@ def split_statements(sql: str) -> list[str]:
 
     Uses :func:`sqlite3.complete_statement`, so semicolons inside strings,
     comments and ``CREATE TRIGGER ... END`` blocks do not split. Trailing text
-    without a semicolon is returned as a final statement.
+    without a semicolon is returned as a final statement; text that holds
+    only whitespace, semicolons and comments is not a statement.
     """
     statements: list[str] = []
     buffer = ""
@@ -147,7 +155,8 @@ def split_statements(sql: str) -> list[str]:
 
 
 def _has_content(text: str) -> bool:
-    return bool(text.strip().rstrip(";").strip())
+    """Whether *text* holds anything besides whitespace, semicolons and comments."""
+    return bool(_COMMENT.sub("", text).strip().rstrip(";").strip())
 
 
 def plan_tree(result: ResultSet) -> ResultSet:
@@ -695,6 +704,8 @@ class Explorer:
             cursor.close()
 
 
+# SQL comments, removed only to decide whether a statement is empty.
+_COMMENT = re.compile(r"--[^\n]*|/\*.*?\*/", re.DOTALL)
 _SEARCH_COLUMNS = ("table", "column", "rowid", "value")
 _STATS_COLUMNS = ("column", "type", "nulls", "distinct", "min", "max", "top")
 # Columns per aggregate query: five expressions each, well below SQLITE_MAX_COLUMN.

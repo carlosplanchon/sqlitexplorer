@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
+import sys
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
 
 from sqlitexplorer import __version__
+from sqlitexplorer.cli import main
 
 # --- Basics -------------------------------------------------------------------
 
@@ -33,6 +37,26 @@ def test_missing_database_is_a_usage_error(invoke: Callable, tmp_path: Path) -> 
     assert result.exit_code == 2
     assert "does not exist" in result.output
     assert not missing.exists()
+
+
+def test_broken_pipe_exits_quietly(
+    database: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # ``sqlitexplorer show ... | head``: the reader goes away, the first
+    # write fails with EPIPE and the command must end without a word.
+    read_end, write_end = os.pipe()
+    os.close(read_end)
+    sink = os.fdopen(write_end, "w", encoding="utf-8")
+    monkeypatch.setattr(sys, "stdout", sink)
+    monkeypatch.setattr(sys, "argv", ["sqlitexplorer", "show", str(database), "users", "-f", "csv"])
+    try:
+        with pytest.raises(SystemExit) as exit_info:
+            main()
+    finally:
+        with suppress(OSError):
+            sink.close()
+    assert exit_info.value.code == 1
+    assert capsys.readouterr().err == ""
 
 
 # --- tables / schema / describe ----------------------------------------------
@@ -463,6 +487,7 @@ def test_query_file_runs_every_statement(
         "INSERT INTO users (name) VALUES ('Zoe');\n"
         "-- a comment; with a semicolon\n"
         "SELECT COUNT(*) AS total FROM users;\n"
+        "-- a trailing comment is not a statement\n"
     )
     result = invoke("query", database, "--file", script, "--write", "-f", "csv")
     assert result.exit_code == 0
@@ -568,6 +593,7 @@ def test_chart_line_prints_braille(invoke: Callable, database: Path) -> None:
     assert braille(result.stdout)
     assert "\x1b[" not in result.stdout
     assert "skipped 1 row with NULL values" in result.stderr
+    assert "resampled" not in result.stderr  # two rows do not need reducing
 
 
 def test_chart_hist_uses_first_column(invoke: Callable, database: Path) -> None:
@@ -830,13 +856,16 @@ def test_chart_resamples_lines_by_default_but_never_histograms(
         connection.executemany(
             "INSERT INTO m VALUES (?, ?)", [(i, float(i % 100)) for i in range(5000)]
         )
+        connection.executemany("INSERT INTO m VALUES (?, NULL)", [(i,) for i in range(5000, 5010)])
         connection.commit()
     finally:
         connection.close()
     args = ("chart", source, "SELECT t, v FROM m", "--width", "80", "--no-color")
     result = invoke(*args)
     assert result.exit_code == 0
+    # Rows skipped for their NULLs are reported apart, not as resampled.
     assert "resampled 5000 rows to" in result.stderr
+    assert "skipped 10 rows with NULL values" in result.stderr
     plain = invoke(*args, "--no-resample")
     assert plain.exit_code == 0
     assert "resampled" not in plain.stderr

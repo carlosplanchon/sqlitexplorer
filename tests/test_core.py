@@ -49,6 +49,10 @@ def test_split_statements_handles_strings_comments_and_triggers() -> None:
     ]
     assert split_statements("  ;; \n") == []
     assert split_statements("SELECT 1;") == ["SELECT 1;"]
+    # Comments after the last statement are not a statement of their own.
+    assert split_statements("SELECT 1; -- done") == ["SELECT 1;"]
+    assert split_statements("/* nothing */ ; -- at all\n") == []
+    assert split_statements("SELECT '--'; SELECT '/*'") == ["SELECT '--';", "SELECT '/*'"]
 
 
 def test_plan_tree_indents_by_depth() -> None:
@@ -153,6 +157,15 @@ def test_stream_yields_rows_lazily(database: Path) -> None:
         assert empty.collect().rows == []
         streamed = db.stream_rows("users", columns=["name"], order_by="id", limit=2).collect()
         assert streamed.rows == db.rows("users", columns=["name"], order_by="id", limit=2).rows
+
+
+def test_abandoned_stream_is_quiet_after_the_connection_closed(database: Path) -> None:
+    # A stream cut short by an error, Ctrl-C or a closed pipe is finalised
+    # once the connection is gone; the cursor is already released by then.
+    with open_database(database) as db:
+        stream = db.stream("SELECT id FROM users ORDER BY id")
+        assert next(stream.rows) == (1,)
+    stream.rows.close()
 
 
 def test_explain_returns_an_indented_plan(database: Path) -> None:
